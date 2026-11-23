@@ -10,7 +10,7 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 | --- | --- | --- | --- |
 | External dependencies | None (only `vertico`) | `posframe` | None (wraps `vertico-buffer`) |
 | Frame reuse | Per-depth frame pool | Single `posframe` buffer/frame | `display-buffer-in-child-frame` |
-| Geometry caching | Skips no-op move/resize calls | Re-evaluates per update | Re-evaluates via `display-buffer` |
+| Geometry caching | Skips no-op move, resize, appearance, and width calls; idle pre-warming | Re-evaluates per update | Re-evaluates via `display-buffer` |
 | Positioning | 27 poshandlers (frame, window, other-window, point) + shorthand + offset | `posframe-poshandler-*` | `display-buffer-in-child-frame` |
 | Sizing controls | Content-adaptive width (`grow-only` / `t` / `nil`), ratio/cols/fn, `size-function` plist, min/max bounds, height resize modes | `size-function` + width/height/min-width/min-height | `display-buffer` sizing |
 | Recursive minibuffers | Depth-indexed pool + cascade offset + outer re-raise | Overlapping / focus quirks | Window layout interference |
@@ -218,6 +218,7 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 | `vertico-child-frame-min-parent-width` | `40` | Minimum parent frame columns |
 | `vertico-child-frame-min-parent-height` | `10` | Minimum parent frame rows |
 | `vertico-child-frame-fallback-mode` | `nil` | Optional fallback Vertico mode for TTY / small frames |
+| `vertico-child-frame-prewarm` | `t` | Pre-create a hidden depth-1 child frame while idle to speed up first popup |
 | `vertico-child-frame-parameters` | `nil` | Extra frame parameters merged at frame creation |
 
 ### Faces
@@ -231,6 +232,7 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 
 - `vertico-child-frame-mode` — global minor mode
 - `vertico-child-frame-set-poshandler` — interactively select and apply a built-in poshandler
+- `vertico-child-frame-warmup` — pre-create a hidden child frame for instant first display
 - `vertico-child-frame-cleanup` — delete all pooled child frames
 - `vertico-multiform-child-frame` — toggle child-frame display inside the active minibuffer
 

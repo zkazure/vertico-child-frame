@@ -58,10 +58,13 @@
           (make-frame-calls 0)
           (resize-calls 0)
           (move-calls 0)
+          (modify-params-calls 0)
+          (set-face-calls 0)
           (all-frames (list parent-frame))
           (mock-window-list (list parent-win))
           (orig-display-graphic-p (symbol-function 'display-graphic-p))
           (orig-frame-live-p (symbol-function 'frame-live-p))
+          (orig-frame-visible-p (symbol-function 'frame-visible-p))
           (orig-frame-parent (symbol-function 'frame-parent))
           (orig-frame-root-window (symbol-function 'frame-root-window))
           (orig-frame-pixel-width (symbol-function 'frame-pixel-width))
@@ -113,6 +116,12 @@
              (if (vcf-test-frame-p f)
                  (vcf-test-frame-live f)
                (funcall orig-frame-live-p f))))
+          ((symbol-function 'frame-visible-p)
+           (lambda (&optional f)
+             (let ((target (or f parent-frame)))
+               (if (vcf-test-frame-p target)
+                   (vcf-test-frame-visible target)
+                 (funcall orig-frame-visible-p f)))))
           ((symbol-function 'frame-parent)
            (lambda (f)
              (if (vcf-test-frame-p f)
@@ -173,9 +182,11 @@
           ((symbol-function 'modify-frame-parameters)
            (lambda (f alist)
              (if (vcf-test-frame-p f)
-                 (dolist (pair alist)
-                   (setf (alist-get (car pair) (vcf-test-frame-params f))
-                         (cdr pair)))
+                 (progn
+                   (cl-incf modify-params-calls)
+                   (dolist (pair alist)
+                     (setf (alist-get (car pair) (vcf-test-frame-params f))
+                           (cdr pair))))
                (funcall orig-modify-frame-parameters f alist))))
           ((symbol-function 'make-frame)
            (lambda (&optional params)
@@ -243,9 +254,11 @@
           ((symbol-function 'set-face-background)
            (lambda (face color &optional frame)
              (if (vcf-test-frame-p frame)
-                 (setf (alist-get (intern (format "face-%s" face))
-                                  (vcf-test-frame-params frame))
-                       color)
+                 (progn
+                   (cl-incf set-face-calls)
+                   (setf (alist-get (intern (format "face-%s" face))
+                                    (vcf-test-frame-params frame))
+                         color))
                (funcall orig-set-face-background face color frame))))
           ((symbol-function 'window-live-p)
            (lambda (w)
@@ -1291,6 +1304,161 @@
                 (delq buf vertico-child-frame--active-buffers))
           (delete-overlay vertico--candidates-ov)
           (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest vcf-test-performance-caching-and-warmup ()
+  "Test appearance caching, width memoization, warmup, and multiform pooling."
+  (vcf-test-with-mock-gui
+    ;; 1. Pre-warm creates 1 hidden depth-1 pooled frame; first setup reuses it
+    (cl-letf (((symbol-function 'selected-frame) (lambda () parent-frame))
+              ((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+              ((symbol-function 'minibuffer-depth) (lambda () 1)))
+      (should (vertico-child-frame-warmup))
+      (should (= make-frame-calls 1))
+      (should (= (length vertico-child-frame--pool) 1))
+      (should-not (vcf-test-frame-visible (cdar vertico-child-frame--pool)))
+      (vertico-child-frame-mode 1)
+      (unwind-protect
+          (progn
+            (with-temp-buffer
+              (setf (vcf-test-win-buffer mb-win) (current-buffer))
+              (vertico--setup)
+              (should (= make-frame-calls 1))
+              (should (eq vertico-child-frame--frame
+                          (cdar vertico-child-frame--pool)))
+              (run-hooks 'minibuffer-exit-hook))
+            ;; 2. Session 2 with unchanged appearance does 0 modify-frame-parameters
+            ;; and 0 set-face-background calls, and hits geometry cache too.
+            (let ((before-m modify-params-calls)
+                  (before-f set-face-calls))
+              (with-temp-buffer
+                (setf (vcf-test-win-buffer mb-win) (current-buffer))
+                (vertico--setup)
+                (should (= make-frame-calls 1))
+                (should (= modify-params-calls before-m))
+                (should (= set-face-calls before-f))
+                ;; Direct sync-appearance with unchanged settings is a full no-op
+                (vertico-child-frame--sync-appearance
+                 vertico-child-frame--frame parent-frame)
+                (should (= modify-params-calls before-m))
+                (should (= set-face-calls before-f))
+                ;; Changing only alpha updates alpha-background without re-sending font
+                (let ((sent-alists nil)
+                      (orig-mod (symbol-function 'modify-frame-parameters)))
+                  (cl-letf (((symbol-function 'modify-frame-parameters)
+                             (lambda (f alist)
+                               (push alist sent-alists)
+                               (funcall orig-mod f alist))))
+                    (let ((vertico-child-frame-alpha 85))
+                      (vertico-child-frame--sync-appearance
+                       vertico-child-frame--frame parent-frame)))
+                  (should (= (length sent-alists) 1))
+                  (should (equal (assq 'alpha-background (car sent-alists))
+                                 '(alpha-background . 85)))
+                  (should-not (assq 'font (car sent-alists))))
+                (run-hooks 'minibuffer-exit-hook))))
+        (vertico-child-frame-mode -1)))
+    ;; 3. Width memoization + window-filtered redisplay + grow-only cap short-circuit
+    (let ((spw-calls 0)
+          (vertico-child-frame-width nil)
+          (vertico-child-frame-width-resize 'grow-only)
+          (vertico-child-frame-resize 'golden-ratio)
+          (vertico-child-frame-margin '(0 . 0)))
+      (setq vcf-test--string-pixel-width-fn
+            (lambda (str)
+              (cl-incf spw-calls)
+              (* 10 (apply #'max 0 (mapcar #'string-width
+                                           (split-string str "\n"))))))
+      (let* ((vertico--candidates-ov (make-overlay 1 1))
+             (vertico--candidates (list (make-string 76 ?a)))
+             (vertico--scroll 0)
+             (resize-invocations 0)
+             (buf (generate-new-buffer " *vcf-cache-test*"))
+             (child-win (make-vcf-test-win :width 74 :height 22 :pixel-h 458))
+             (child-frame (make-vcf-test-frame
+                           :id 70
+                           :parent parent-frame
+                           :root-window child-win
+                           :cols 74
+                           :rows 22
+                           :pixel-w 742
+                           :pixel-h 458
+                           :char-w 10
+                           :char-h 20
+                           :live t)))
+        (setf (vcf-test-win-frame child-win) child-frame)
+        (unwind-protect
+            (with-current-buffer buf
+              (insert "Find: ")
+              (setq vertico-child-frame--active t
+                    vertico-child-frame--frame child-frame
+                    vertico-child-frame--window child-win
+                    vertico-child-frame--parent parent-frame
+                    vertico-child-frame--depth 1
+                    vertico-child-frame--max-width-seen 0
+                    vertico-child-frame--content-width-cache nil)
+              (setf (vcf-test-win-buffer child-win) buf)
+              (setf (vcf-test-win-buffer mb-win) buf)
+              ;; Redisplay called on mb-win skips resize completely
+              (cl-letf (((symbol-function 'vertico-child-frame--resize)
+                         (lambda (_h) (cl-incf resize-invocations))))
+                (vertico-child-frame--redisplay mb-win)
+                (should (= resize-invocations 0))
+                (vertico-child-frame--redisplay child-win)
+                (should (= resize-invocations 1)))
+              ;; Repeated compute-geometry calls with same rendered + candidates hit cache
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 50 ?a)))
+              (setq spw-calls 0)
+              (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                         820))
+              (should (= spw-calls 2))
+              (vertico-child-frame--compute-geometry parent-frame 10 1)
+              (vertico-child-frame--compute-geometry parent-frame 10 1)
+              (should (= spw-calls 2))
+              ;; Once grow-only hits auto-upper (floor(1182*0.9) = 1063),
+              ;; new candidates skip string-pixel-width altogether
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 120 ?x)))
+              (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                         1063))
+              (setq spw-calls 0)
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 40 ?y)))
+              (setq vertico--candidates (list (make-string 40 ?y)))
+              (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                         1063))
+              (should (= spw-calls 0)))
+          (delete-overlay vertico--candidates-ov)
+          (when (buffer-live-p buf) (kill-buffer buf)))))
+    ;; 4. `vertico-multiform-mode' keeps pooled child frame across sessions
+    (let ((vertico-multiform-mode t)
+          (before-make make-frame-calls))
+      (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                ((symbol-function 'minibuffer-depth) (lambda () 1)))
+        (vertico-child-frame-mode 1)
+        (with-temp-buffer
+          (setf (vcf-test-win-buffer mb-win) (current-buffer))
+          (vertico--setup)
+          (run-hooks 'minibuffer-exit-hook))
+        (vertico-child-frame-mode -1)
+        ;; Pool retained while multiform mode is active
+        (should (= (length vertico-child-frame--pool) 1))
+        (should (vcf-test-frame-live (cdar vertico-child-frame--pool)))
+        (should-not (vcf-test-frame-visible (cdar vertico-child-frame--pool)))
+        ;; Next multiform session reuses the parked frame without make-frame
+        (let ((calls-after-first make-frame-calls))
+          (vertico-child-frame-mode 1)
+          (with-temp-buffer
+            (setf (vcf-test-win-buffer mb-win) (current-buffer))
+            (vertico--setup)
+            (should (= make-frame-calls calls-after-first))
+            (run-hooks 'minibuffer-exit-hook))
+          (vertico-child-frame-mode -1)
+          (should (>= calls-after-first before-make))))
+      ;; Without multiform mode, disabling deletes pool as usual
+      (setq vertico-multiform-mode nil)
+      (vertico-child-frame-mode -1)
+      (should-not vertico-child-frame--pool))))
 
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here

@@ -61,6 +61,7 @@
 (defvar vertico--scroll)
 (defvar vertico-multiform--display-modes)
 (defvar vertico-multiform-map)
+(defvar vertico-multiform-mode)
 
 (declare-function vertico--command-p "vertico")
 (declare-function vertico--exhibit "vertico")
@@ -385,6 +386,12 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
                  (symbol :tag "Minor mode symbol"))
   :group 'vertico-child-frame)
 
+(defcustom vertico-child-frame-prewarm t
+  "When non-nil, pre-create a hidden depth-1 child frame while idle.
+This avoids first-popup `make-frame' and face-realization latency."
+  :type 'boolean
+  :group 'vertico-child-frame)
+
 (defcustom vertico-child-frame-parameters nil
   "Extra frame parameters merged when creating Vertico child frames."
   :type '(alist :key-type symbol :value-type sexp)
@@ -453,6 +460,12 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
 
 (defvar vertico-child-frame--exhibiting nil
   "Non-nil while re-exhibiting Vertico after an auto-width growth.")
+
+(defvar vertico-child-frame--warmup-timer nil
+  "Idle timer scheduled for child-frame pre-warming.")
+
+(defvar-local vertico-child-frame--content-width-cache nil
+  "Cached content-width entry `(KEY . PIXELS)' for reuse.")
 
 (defvar-local vertico-child-frame--max-height-seen 0
   "Maximum line count observed so far in `grow-only' resize mode.")
@@ -630,30 +643,50 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
       (when (< start end)
         (cl-subseq vertico--candidates start end)))))
 
-(defun vertico-child-frame--content-pixel-width (parent)
-  "Return widest visible candidate pixel width on PARENT, or nil."
-  (let (widths)
-    (when (and (boundp 'vertico--candidates-ov)
-               (overlayp vertico--candidates-ov))
-      (let ((rendered (overlay-get vertico--candidates-ov 'before-string)))
+(defun vertico-child-frame--content-pixel-width (parent &optional cap-px)
+  "Return widest visible candidate pixel width on PARENT, or nil.
+CAP-PX bounds measurement so redundant layout passes can be skipped."
+  (let* ((rendered (and (boundp 'vertico--candidates-ov)
+                        (overlayp vertico--candidates-ov)
+                        (overlay-get vertico--candidates-ov 'before-string)))
+         (cands (and (boundp 'vertico--candidates) vertico--candidates))
+         (scroll (if (boundp 'vertico--scroll) (or vertico--scroll 0) 0))
+         (count (if (boundp 'vertico-count) (or vertico-count 10) 10))
+         (parent-cw (max 1 (frame-char-width parent)))
+         (child-cw (if (frame-live-p vertico-child-frame--frame)
+                       (max 1 (frame-char-width vertico-child-frame--frame))
+                     parent-cw))
+         (cached vertico-child-frame--content-width-cache)
+         (k (car cached)))
+    (if (and cached
+             (eq (nth 0 k) rendered)
+             (eq (nth 1 k) cands)
+             (eql (nth 2 k) scroll)
+             (eql (nth 3 k) count)
+             (eql (nth 4 k) parent-cw)
+             (eql (nth 5 k) child-cw))
+        (cdr cached)
+      (let (widths rendered-px)
         (when (and (stringp rendered) (string-match-p "\n" rendered))
           (when-let* ((px (ignore-errors (string-pixel-width rendered))))
-            (push px widths)))))
-    (let* ((visible (vertico-child-frame--visible-candidates))
-           (text (and visible
-                      (mapconcat (lambda (cand)
-                                   (if (stringp cand) cand ""))
-                                 visible "\n"))))
-      (when (and text (> (length text) 0))
-        (when-let* ((px (ignore-errors (string-pixel-width text))))
-          (push px widths))))
-    (when widths
-      (let* ((max-px (apply #'max widths))
-             (parent-cw (max 1 (frame-char-width parent)))
-             (child-cw (if (frame-live-p vertico-child-frame--frame)
-                           (max 1 (frame-char-width vertico-child-frame--frame))
-                         parent-cw)))
-        (round (* max-px (/ (float child-cw) parent-cw)))))))
+            (setq rendered-px px)
+            (push px widths)))
+        (unless (and cap-px rendered-px (>= rendered-px cap-px))
+          (let* ((visible (vertico-child-frame--visible-candidates))
+                 (text (and visible
+                            (mapconcat (lambda (cand)
+                                         (if (stringp cand) cand ""))
+                                       visible "\n"))))
+            (when (and text (> (length text) 0))
+              (when-let* ((px (ignore-errors (string-pixel-width text))))
+                (push px widths)))))
+        (let ((result (when widths
+                        (round (* (apply #'max widths)
+                                  (/ (float child-cw) parent-cw))))))
+          (setq vertico-child-frame--content-width-cache
+                (cons (list rendered cands scroll count parent-cw child-cw)
+                      result))
+          result)))))
 
 (defun vertico-child-frame--resolve-width (parent &optional size-plist)
   "Compute child-frame text width in pixels for PARENT using SIZE-PLIST."
@@ -688,8 +721,15 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
                  (min effective-upper
                       (floor (* max-parent-px
                                 vertico-child-frame--auto-width-max-ratio))))))
-         (content-px (when (and (null spec) vertico-child-frame-width-resize)
-                       (vertico-child-frame--content-pixel-width parent)))
+         (hit-cap (and (null spec)
+                       (eq vertico-child-frame-width-resize 'grow-only)
+                       (> auto-upper 0)
+                       (>= vertico-child-frame--max-width-seen auto-upper)))
+         (content-px (when (and (null spec)
+                                vertico-child-frame-width-resize
+                                (not hit-cap))
+                       (vertico-child-frame--content-pixel-width
+                        parent auto-upper)))
          (raw-px
           (cond
            ((functionp spec) (round (funcall spec parent)))
@@ -1253,8 +1293,8 @@ Falls back to PARENT center if point position is unavailable."
   (let ((val (face-attribute face attr frame t)))
     (unless (eq val 'unspecified) val)))
 
-(defun vertico-child-frame--sync-appearance (frame parent)
-  "Synchronize FRAME fonts, colors, borders, alpha, and fringes from PARENT."
+(defun vertico-child-frame--appearance-spec (parent)
+  "Return resolved appearance attribute list for child frames on PARENT."
   (let* ((font (or vertico-child-frame-font
                    (vertico-child-frame--face-attribute 'vertico-child-frame :font)
                    (frame-parameter parent 'font)))
@@ -1264,6 +1304,11 @@ Falls back to PARENT center if point position is unavailable."
                  (vertico-child-frame--face-attribute 'default :foreground parent)))
          (border-bg (vertico-child-frame--face-attribute
                      'vertico-child-frame-border :background))
+         (ib-bg (if (and (integerp vertico-child-frame-border-width)
+                         (zerop vertico-child-frame-border-width)
+                         border-bg)
+                    border-bg
+                  bg))
          (alpha-bg (if (integerp vertico-child-frame-alpha)
                        vertico-child-frame-alpha
                      (alist-get 'alpha-background vertico-child-frame-parameters)))
@@ -1275,30 +1320,59 @@ Falls back to PARENT center if point position is unavailable."
                                 (integerp vertico-child-frame-internal-border-width)
                                 (> vertico-child-frame-internal-border-width 0))
                            nil
-                         vertico-child-frame-border-width))
-         (params (delq nil
-                       (list (when font (cons 'font font))
-                             (when bg (cons 'background-color bg))
-                             (when fg (cons 'foreground-color fg))
-                             (cons 'alpha-background alpha-bg)
-                             (cons 'alpha alpha-pair)
-                             (cons 'child-frame-border-width border-width)
-                             (cons 'internal-border-width
-                                   vertico-child-frame-internal-border-width)))))
-    (let ((frame-inhibit-implied-resize t))
-      (modify-frame-parameters frame params)
-      (when (and border-bg (facep 'child-frame-border))
-        (set-face-background 'child-frame-border border-bg frame))
-      (when (facep 'internal-border)
-        (when-let* ((ib-bg (if (and (zerop vertico-child-frame-border-width) border-bg)
-                               border-bg
-                             bg)))
-          (set-face-background 'internal-border ib-bg frame)))
-      (when-let* ((win (frame-root-window frame))
-                  ((window-live-p win)))
-        (set-window-fringes win
-                            vertico-child-frame-left-fringe
-                            vertico-child-frame-right-fringe)))))
+                         vertico-child-frame-border-width)))
+    (list font bg fg border-bg ib-bg alpha-bg alpha-pair border-width
+          vertico-child-frame-internal-border-width
+          vertico-child-frame-left-fringe
+          vertico-child-frame-right-fringe)))
+
+(defun vertico-child-frame--sync-appearance (frame parent)
+  "Synchronize FRAME fonts, colors, borders, alpha, and fringes from PARENT."
+  (let* ((sig (vertico-child-frame--appearance-spec parent))
+         (cached (frame-parameter frame 'vertico-child-frame--appearance)))
+    (unless (equal sig cached)
+      (pcase-let*
+          ((`(,font ,bg ,fg ,border-bg ,ib-bg ,alpha-bg ,alpha-pair
+              ,border-width ,ib-width ,lf ,rf)
+            sig)
+           (params (delq nil
+                         (list (when font (cons 'font font))
+                               (when bg (cons 'background-color bg))
+                               (when fg (cons 'foreground-color fg))
+                               (cons 'alpha-background alpha-bg)
+                               (cons 'alpha alpha-pair)
+                               (cons 'child-frame-border-width border-width)
+                               (cons 'internal-border-width ib-width))))
+           (changed-params
+            (cl-remove-if
+             (lambda (pair)
+               (equal (cdr pair) (frame-parameter frame (car pair))))
+             params))
+           (border-changed
+            (and border-bg (facep 'child-frame-border)
+                 (or (null cached)
+                     (not (equal border-bg (nth 3 cached))))))
+           (ib-changed
+            (and ib-bg (facep 'internal-border)
+                 (or (null cached)
+                     (not (equal ib-bg (nth 4 cached))))))
+           (fringe-changed
+            (or (null cached)
+                (not (eql lf (nth 9 cached)))
+                (not (eql rf (nth 10 cached))))))
+        (let ((frame-inhibit-implied-resize t)
+              (inhibit-redisplay t))
+          (when changed-params
+            (modify-frame-parameters frame changed-params))
+          (when border-changed
+            (set-face-background 'child-frame-border border-bg frame))
+          (when ib-changed
+            (set-face-background 'internal-border ib-bg frame))
+          (when fringe-changed
+            (when-let* ((win (frame-root-window frame))
+                        ((window-live-p win)))
+              (set-window-fringes win lf rf)))
+          (set-frame-parameter frame 'vertico-child-frame--appearance sig))))))
 
 (defun vertico-child-frame--configure-window (win)
   "Configure child-frame root window WIN to suppress extraneous chrome."
@@ -1316,20 +1390,40 @@ Falls back to PARENT center if point position is unavailable."
       (when (frame-live-p frame)
         (ignore-errors (delete-frame frame)))
       (setq frame
-            (let* ((init-px (vertico-child-frame--golden-pixel-size parent))
-                   (init-cols (max 20 (round (/ (float (car init-px))
-                                                (max 1 (frame-char-width parent))))))
-                   (init-rows (max 10 (round (/ (float (cdr init-px))
-                                                (max 1 (frame-char-height parent))))))
-                   (frame-inhibit-implied-resize t))
+            (pcase-let*
+                ((`(,font ,bg ,fg ,_border-bg ,_ib-bg ,alpha-bg ,alpha-pair
+                    ,border-width ,ib-width ,lf ,rf)
+                  (vertico-child-frame--appearance-spec parent))
+                 (init-px (vertico-child-frame--golden-pixel-size parent))
+                 (init-cols (max 20 (round (/ (float (car init-px))
+                                              (max 1 (frame-char-width parent))))))
+                 (init-rows (max 10 (round (/ (float (cdr init-px))
+                                              (max 1 (frame-char-height parent))))))
+                 (init-params
+                  (delq nil
+                        (list (cons 'parent-frame parent)
+                              (cons 'minibuffer (minibuffer-window parent))
+                              '(visibility . nil)
+                              (cons 'width init-cols)
+                              (cons 'height init-rows)
+                              (when font (cons 'font font))
+                              (when bg (cons 'background-color bg))
+                              (when fg (cons 'foreground-color fg))
+                              (cons 'alpha-background alpha-bg)
+                              (cons 'alpha alpha-pair)
+                              (cons 'child-frame-border-width border-width)
+                              (cons 'internal-border-width ib-width)
+                              (cons 'left-fringe lf)
+                              (cons 'right-fringe rf))))
+                 (frame-inhibit-implied-resize t))
               (make-frame
-               `((parent-frame . ,parent)
-                 (minibuffer . ,(minibuffer-window parent))
-                 (visibility . nil)
-                 (width . ,init-cols)
-                 (height . ,init-rows)
-                 ,@vertico-child-frame--default-parameters
-                 ,@vertico-child-frame-parameters))))
+               (append init-params
+                       vertico-child-frame--default-parameters
+                       vertico-child-frame-parameters))))
+      (let ((root (frame-root-window frame)))
+        (vertico-child-frame--configure-window root)
+        (vertico-child-frame--set-window-buffer
+         root (vertico-child-frame--scratch-buffer)))
       (if entry
           (setcdr entry frame)
         (push (cons depth frame) vertico-child-frame--pool)))
@@ -1378,9 +1472,52 @@ Falls back to PARENT center if point position is unavailable."
                             vertico-child-frame--active-frames))))
 
 ;;;###autoload
+(defun vertico-child-frame-warmup ()
+  "Pre-create a hidden depth-1 child frame for faster first display.
+Return non-nil when a child frame was pre-created."
+  (interactive)
+  (let ((parent (selected-frame)))
+    (when (and (frame-live-p parent)
+               (not (frame-parameter parent 'parent-frame))
+               (eq (frame-visible-p parent) t)
+               (vertico-child-frame--can-display-p parent))
+      (let ((entry (assq 1 vertico-child-frame--pool)))
+        (unless (and (frame-live-p (cdr entry))
+                     (eq (frame-parent (cdr entry)) parent))
+          (vertico-child-frame--acquire-frame parent 1)
+          t)))))
+
+(defun vertico-child-frame--maybe-warmup ()
+  "Pre-warm a child frame when idle if pre-warming is enabled."
+  (when (timerp vertico-child-frame--warmup-timer)
+    (cancel-timer vertico-child-frame--warmup-timer)
+    (setq vertico-child-frame--warmup-timer nil))
+  (remove-hook 'window-setup-hook #'vertico-child-frame--maybe-warmup)
+  (when (and vertico-child-frame-prewarm
+             (or (bound-and-true-p vertico-child-frame-mode)
+                 (bound-and-true-p vertico-multiform-mode)))
+    (ignore-errors (vertico-child-frame-warmup))))
+
+(defun vertico-child-frame--schedule-warmup ()
+  "Schedule background idle pre-warming of a depth-1 child frame."
+  (when (and vertico-child-frame-prewarm
+             (not noninteractive)
+             (null vertico-child-frame--warmup-timer))
+    (add-hook 'server-after-make-frame-hook #'vertico-child-frame--maybe-warmup)
+    (if after-init-time
+        (setq vertico-child-frame--warmup-timer
+              (run-with-idle-timer 0.3 nil #'vertico-child-frame--maybe-warmup))
+      (add-hook 'window-setup-hook #'vertico-child-frame--maybe-warmup))))
+
+;;;###autoload
 (defun vertico-child-frame-cleanup ()
   "Delete all pooled Vertico child frames."
   (interactive)
+  (when (timerp vertico-child-frame--warmup-timer)
+    (cancel-timer vertico-child-frame--warmup-timer)
+    (setq vertico-child-frame--warmup-timer nil))
+  (remove-hook 'window-setup-hook #'vertico-child-frame--maybe-warmup)
+  (remove-hook 'server-after-make-frame-hook #'vertico-child-frame--maybe-warmup)
   (dolist (entry vertico-child-frame--pool)
     (when (frame-live-p (cdr entry))
       (ignore-errors (delete-frame (cdr entry)))))
@@ -1414,22 +1551,23 @@ Falls back to PARENT center if point position is unavailable."
     (set-window-buffer win buf)
     (set-window-dedicated-p win t)))
 
-(defun vertico-child-frame--redisplay (_win)
-  "Synchronize child-frame point, wrapping, and hidden minibuffer."
+(defun vertico-child-frame--redisplay (win)
+  "Synchronize child-frame WIN point, wrapping, and hidden minibuffer."
   (when vertico-child-frame--active
     (let ((vertico-child-frame--in-redisplay t)
           (mbwin (active-minibuffer-window))
-          (win vertico-child-frame--window))
+          (cwin vertico-child-frame--window))
       (when (and (window-live-p mbwin)
                  (eq (window-buffer mbwin) (current-buffer)))
         (vertico-child-frame--hide-minibuffer mbwin))
-      (vertico-child-frame--update-cursor)
-      (vertico-child-frame--update-truncation win)
-      (vertico-child-frame--resize
-       (or vertico-child-frame--last-lines vertico-count))
-      (when (and (window-live-p win)
-                 (eq (window-buffer win) (current-buffer)))
-        (set-window-point win (point))))))
+      (when (or (null win) (eq win cwin))
+        (vertico-child-frame--update-cursor)
+        (vertico-child-frame--update-truncation cwin)
+        (vertico-child-frame--resize
+         (or vertico-child-frame--last-lines vertico-count))
+        (when (and (window-live-p cwin)
+                   (eq (window-buffer cwin) (current-buffer)))
+          (set-window-point cwin (point)))))))
 
 (defun vertico-child-frame--on-window-size-change (frame)
   "Adapt active child frames after FRAME or its parent is resized."
@@ -1445,7 +1583,8 @@ Falls back to PARENT center if point position is unavailable."
                      (frame-live-p vertico-child-frame--parent))
             (cond
              ((eq frame vertico-child-frame--parent)
-              (setq vertico-child-frame--max-width-seen 0)
+              (setq vertico-child-frame--max-width-seen 0
+                    vertico-child-frame--content-width-cache nil)
               (set-frame-parameter vertico-child-frame--frame
                                    'vertico-child-frame--geometry nil)
               (vertico-child-frame--resize
@@ -1527,6 +1666,7 @@ child frame immediately."
                 vertico-child-frame--parent parent
                 vertico-child-frame--max-height-seen 0
                 vertico-child-frame--max-width-seen 0
+                vertico-child-frame--content-width-cache nil
                 vertico-child-frame--last-lines vertico-count
                 vertico-child-frame--orig-vertico-count vertico-count
                 vertico-child-frame--orig-vertico-count-local
@@ -1551,18 +1691,21 @@ child frame immediately."
           (when (and (boundp 'vertico--count-ov) (overlayp vertico--count-ov))
             (overlay-put vertico--count-ov 'window win))
           (vertico-child-frame--hide-minibuffer mbwin)
-          (vertico-child-frame--apply-geometry
-           frame (vertico-child-frame--compute-geometry parent vertico-count depth))
-          (vertico-child-frame--update-truncation win)
           (let* ((size-plist (when (functionp vertico-child-frame-size-function)
                                (funcall vertico-child-frame-size-function)))
                  (geometry (vertico-child-frame--compute-geometry
                             parent vertico-count depth))
-                 (prompt-lines (vertico-child-frame--prompt-lines
-                                parent (nth 2 geometry))))
+                 (prev-trunc truncate-lines))
             (vertico-child-frame--apply-geometry frame geometry)
+            (vertico-child-frame--update-truncation win)
+            (unless (eq prev-trunc truncate-lines)
+              (setq geometry (vertico-child-frame--compute-geometry
+                              parent vertico-count depth))
+              (vertico-child-frame--apply-geometry frame geometry))
             (vertico-child-frame--sync-vertico-count
-             parent (nth 3 geometry) prompt-lines size-plist)
+             parent (nth 3 geometry)
+             (vertico-child-frame--prompt-lines parent (nth 2 geometry))
+             size-plist)
             (setq vertico-child-frame--last-lines vertico-count)
             (cl-pushnew (current-buffer) vertico-child-frame--active-buffers :test #'eq)
             (setq vertico-child-frame--active-frames
@@ -1570,8 +1713,10 @@ child frame immediately."
                         (assq-delete-all depth vertico-child-frame--active-frames)))
             (make-frame-visible frame)
             (raise-frame frame)
-            ;; Re-verify after mapping in case GTK/WM repositioned the frame.
-            (vertico-child-frame--apply-geometry frame geometry))
+            ;; Re-verify after mapping only if GTK/WM shifted the frame.
+            (unless (equal (frame-position frame)
+                           (cons (car geometry) (cadr geometry)))
+              (vertico-child-frame--apply-geometry frame geometry)))
           (vertico-child-frame--update-cursor)
           (when (window-live-p win)
             (set-window-point win (point)))
@@ -1591,6 +1736,7 @@ child frame immediately."
             vertico-child-frame--depth nil
             vertico-child-frame--parent nil
             vertico-child-frame--max-width-seen 0
+            vertico-child-frame--content-width-cache nil
             vertico-child-frame--active-buffers
             (delq (current-buffer) vertico-child-frame--active-buffers))
       (remove-hook 'pre-redisplay-functions #'vertico-child-frame--redisplay :local)
@@ -1651,6 +1797,7 @@ child frame immediately."
         (add-hook 'delete-frame-functions #'vertico-child-frame--on-delete-frame)
         (add-hook 'window-size-change-functions
                   #'vertico-child-frame--on-window-size-change)
+        (vertico-child-frame--schedule-warmup)
         (when (and (minibufferp) (bound-and-true-p vertico--input))
           (vertico-child-frame--setup)
           (when (fboundp 'vertico--exhibit)
@@ -1660,12 +1807,19 @@ child frame immediately."
     (remove-hook 'window-size-change-functions
                  #'vertico-child-frame--on-window-size-change)
     (if (and (minibufferp) (bound-and-true-p vertico--input))
-        (progn
+        (let ((was-active vertico-child-frame--active))
           (vertico-child-frame--teardown)
           (vertico-child-frame--deactivate-fallback)
-          (when (fboundp 'vertico--exhibit)
+          (when (and was-active (fboundp 'vertico--exhibit))
             (vertico--exhibit)))
-      (vertico-child-frame-cleanup))))
+      (if (bound-and-true-p vertico-multiform-mode)
+          (progn
+            (dolist (entry vertico-child-frame--pool)
+              (when (frame-live-p (cdr entry))
+                (ignore-errors (make-frame-invisible (cdr entry) t))))
+            (setq vertico-child-frame--active-frames nil
+                  vertico-child-frame--active-buffers nil))
+        (vertico-child-frame-cleanup)))))
 
 (cl-defmethod vertico--setup :after (&context (vertico-child-frame-mode (eql t)))
   "Set up the child frame when VERTICO-CHILD-FRAME-MODE is active."
@@ -1690,7 +1844,8 @@ child frame immediately."
   (when (and (boundp 'vertico-multiform-map)
              (keymapp vertico-multiform-map)
              (not (lookup-key vertico-multiform-map (kbd "M-C"))))
-    (define-key vertico-multiform-map (kbd "M-C") #'vertico-multiform-child-frame)))
+    (define-key vertico-multiform-map (kbd "M-C") #'vertico-multiform-child-frame))
+  (vertico-child-frame--schedule-warmup))
 
 (provide 'vertico-child-frame)
 ;;; vertico-child-frame.el ends here

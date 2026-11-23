@@ -1,5 +1,6 @@
 ;;; vertico-multiform.el --- Minimal vertico-multiform stub for testing -*- lexical-binding: t -*-
 
+(defvar vertico-multiform-mode nil)
 (defvar vertico-multiform--display-modes nil)
 (defvar vertico-multiform-map (make-sparse-keymap))
 (defvar vertico-multiform-stub--toggled nil)
