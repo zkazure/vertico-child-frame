@@ -195,6 +195,20 @@ pixels relative to PARENT."
                  vertico-child-frame-poshandler-window-bottom-left-corner)
           (const :tag "Window bottom right corner"
                  vertico-child-frame-poshandler-window-bottom-right-corner)
+          (const :tag "Other window center"
+                 vertico-child-frame-poshandler-other-window-center)
+          (const :tag "Other window top center"
+                 vertico-child-frame-poshandler-other-window-top-center)
+          (const :tag "Other window top left corner"
+                 vertico-child-frame-poshandler-other-window-top-left-corner)
+          (const :tag "Other window top right corner"
+                 vertico-child-frame-poshandler-other-window-top-right-corner)
+          (const :tag "Other window bottom center"
+                 vertico-child-frame-poshandler-other-window-bottom-center)
+          (const :tag "Other window bottom left corner"
+                 vertico-child-frame-poshandler-other-window-bottom-left-corner)
+          (const :tag "Other window bottom right corner"
+                 vertico-child-frame-poshandler-other-window-bottom-right-corner)
           (const :tag "Point bottom left corner"
                  vertico-child-frame-poshandler-point-bottom-left-corner)
           (const :tag "Point top left corner"
@@ -520,6 +534,37 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
     (when (and (window-live-p win) (eq (window-frame win) parent))
       (window-pixel-edges win))))
 
+(defun vertico-child-frame--other-window-edges (parent)
+  "Return pixel edges of another regular window on PARENT, or nil."
+  (let ((selected (minibuffer-selected-window)))
+    (cl-loop for win in (window-list parent 'no-minibuf selected)
+             when (and (not (eq win selected))
+                       (window-live-p win)
+                       (not (window-minibuffer-p win))
+                       (not (window-parameter win 'no-other-window)))
+             return (window-pixel-edges win))))
+
+(defun vertico-child-frame--position-in-edges (anchor edges width height)
+  "Compute (X . Y) for ANCHOR inside pixel EDGES for WIDTH by HEIGHT."
+  (pcase-let ((`(,left ,top ,right ,bottom) edges))
+    (pcase anchor
+      ('center
+       (cons (+ left (round (/ (- (- right left) width) 2.0)))
+             (+ top (round (/ (- (- bottom top) height) 2.0)))))
+      ('top-center
+       (let ((win-w (- right left))
+             (win-h (- bottom top)))
+         (cons (+ left (round (/ (- win-w width) 2.0)))
+               (+ top (vertico-child-frame--resolve-offset
+                       vertico-child-frame-top-offset win-h)))))
+      ('top-left-corner (cons left top))
+      ('top-right-corner (cons (- right width) top))
+      ('bottom-center
+       (cons (+ left (round (/ (- (- right left) width) 2.0)))
+             (- bottom height)))
+      ('bottom-left-corner (cons left (- bottom height)))
+      ('bottom-right-corner (cons (- right width) (- bottom height))))))
+
 (defun vertico-child-frame--point-pixel-position (parent)
   "Return (X Y LINE-HEIGHT) in pixels for point in selected window on PARENT."
   (let ((win (minibuffer-selected-window)))
@@ -610,60 +655,104 @@ otherwise top-left."
   "Position child frame of WIDTH by HEIGHT at center of selected window.
 Falls back to PARENT center if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (pcase-let ((`(,left ,top ,right ,bottom) edges))
-        (cons (+ left (round (/ (- (- right left) width) 2.0)))
-              (+ top (round (/ (- (- bottom top) height) 2.0)))))
+      (vertico-child-frame--position-in-edges 'center edges width height)
     (vertico-child-frame-poshandler-frame-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at top center of selected window.
 Falls back to PARENT top center if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (pcase-let ((`(,left ,top ,right ,bottom) edges))
-        (let* ((win-w (- right left))
-               (win-h (- bottom top))
-               (x (+ left (round (/ (- win-w width) 2.0))))
-               (y (+ top (vertico-child-frame--resolve-offset
-                          vertico-child-frame-top-offset win-h))))
-          (cons x y)))
+      (vertico-child-frame--position-in-edges 'top-center edges width height)
     (vertico-child-frame-poshandler-frame-top-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-left-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-left of selected window.
 Falls back to PARENT top-left if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (cons (nth 0 edges) (nth 1 edges))
+      (vertico-child-frame--position-in-edges 'top-left-corner edges width height)
     (vertico-child-frame-poshandler-frame-top-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-right of selected window.
 Falls back to PARENT top-right if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (cons (- (nth 2 edges) width) (nth 1 edges))
+      (vertico-child-frame--position-in-edges 'top-right-corner edges width height)
     (vertico-child-frame-poshandler-frame-top-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom center of selected window.
 Falls back to PARENT bottom center if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (pcase-let ((`(,left ,_top ,right ,bottom) edges))
-        (cons (+ left (round (/ (- (- right left) width) 2.0)))
-              (- bottom height)))
+      (vertico-child-frame--position-in-edges 'bottom-center edges width height)
     (vertico-child-frame-poshandler-frame-bottom-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-left-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-left of selected window.
 Falls back to PARENT bottom-left if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (cons (nth 0 edges) (- (nth 3 edges) height))
+      (vertico-child-frame--position-in-edges 'bottom-left-corner edges width height)
     (vertico-child-frame-poshandler-frame-bottom-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-right of selected window.
 Falls back to PARENT bottom-right if no selected window belongs to PARENT."
   (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (cons (- (nth 2 edges) width) (- (nth 3 edges) height))
+      (vertico-child-frame--position-in-edges 'bottom-right-corner edges width height)
     (vertico-child-frame-poshandler-frame-bottom-right-corner parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-center (parent width height)
+  "Position child frame of WIDTH by HEIGHT at center of another window.
+Falls back to selected window center on PARENT if only one window exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'center edges width height)
+    (vertico-child-frame-poshandler-window-center parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-top-center (parent width height)
+  "Position child frame of WIDTH by HEIGHT at top center of another window.
+Falls back to selected window top center on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'top-center edges width height)
+    (vertico-child-frame-poshandler-window-top-center parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-top-left-corner
+    (parent width height)
+  "Position child frame of WIDTH by HEIGHT at top-left of another window.
+Falls back to selected window top-left on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'top-left-corner edges width height)
+    (vertico-child-frame-poshandler-window-top-left-corner parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-top-right-corner
+    (parent width height)
+  "Position child frame of WIDTH by HEIGHT at top-right of another window.
+Falls back to selected window top-right on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'top-right-corner edges width height)
+    (vertico-child-frame-poshandler-window-top-right-corner parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-bottom-center
+    (parent width height)
+  "Position child frame of WIDTH by HEIGHT at bottom center of another window.
+Falls back to selected window bottom center on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'bottom-center edges width height)
+    (vertico-child-frame-poshandler-window-bottom-center parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-bottom-left-corner
+    (parent width height)
+  "Position child frame of WIDTH by HEIGHT at bottom-left of another window.
+Falls back to selected window bottom-left on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'bottom-left-corner edges width height)
+    (vertico-child-frame-poshandler-window-bottom-left-corner parent width height)))
+
+(defun vertico-child-frame-poshandler-other-window-bottom-right-corner
+    (parent width height)
+  "Position child frame of WIDTH by HEIGHT at bottom-right of another window.
+Falls back to selected window bottom-right on PARENT if none exists."
+  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
+      (vertico-child-frame--position-in-edges 'bottom-right-corner edges width height)
+    (vertico-child-frame-poshandler-window-bottom-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-point-bottom-left-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT below point, flipping upward if needed.
@@ -730,6 +819,18 @@ Falls back to PARENT center if point position is unavailable."
      . vertico-child-frame-poshandler-window-bottom-left-corner)
     (window-bottom-right-corner
      . vertico-child-frame-poshandler-window-bottom-right-corner)
+    (other-window-center . vertico-child-frame-poshandler-other-window-center)
+    (other-window-top-center . vertico-child-frame-poshandler-other-window-top-center)
+    (other-window-top-left-corner
+     . vertico-child-frame-poshandler-other-window-top-left-corner)
+    (other-window-top-right-corner
+     . vertico-child-frame-poshandler-other-window-top-right-corner)
+    (other-window-bottom-center
+     . vertico-child-frame-poshandler-other-window-bottom-center)
+    (other-window-bottom-left-corner
+     . vertico-child-frame-poshandler-other-window-bottom-left-corner)
+    (other-window-bottom-right-corner
+     . vertico-child-frame-poshandler-other-window-bottom-right-corner)
     (point-bottom-left-corner
      . vertico-child-frame-poshandler-point-bottom-left-corner)
     (point-top-left-corner . vertico-child-frame-poshandler-point-top-left-corner)

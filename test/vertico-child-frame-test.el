@@ -57,6 +57,7 @@
           (resize-calls 0)
           (move-calls 0)
           (all-frames (list parent-frame))
+          (mock-window-list (list parent-win))
           (orig-display-graphic-p (symbol-function 'display-graphic-p))
           (orig-frame-live-p (symbol-function 'frame-live-p))
           (orig-frame-parent (symbol-function 'frame-parent))
@@ -77,6 +78,9 @@
           (orig-set-window-dedicated-p (symbol-function 'set-window-dedicated-p))
           (orig-window-dedicated-p (symbol-function 'window-dedicated-p))
           (orig-set-window-parameter (symbol-function 'set-window-parameter))
+          (orig-window-parameter (symbol-function 'window-parameter))
+          (orig-window-list (symbol-function 'window-list))
+          (orig-window-minibuffer-p (symbol-function 'window-minibuffer-p))
           (orig-set-window-fringes (symbol-function 'set-window-fringes))
           (orig-set-window-point (symbol-function 'set-window-point))
           (orig-set-window-vscroll (symbol-function 'set-window-vscroll))
@@ -261,6 +265,21 @@
              (if (vcf-test-win-p w)
                  (setf (alist-get p (vcf-test-win-params w)) v)
                (funcall orig-set-window-parameter w p v))))
+          ((symbol-function 'window-parameter)
+           (lambda (w p)
+             (if (vcf-test-win-p w)
+                 (alist-get p (vcf-test-win-params w))
+               (funcall orig-window-parameter w p))))
+          ((symbol-function 'window-list)
+           (lambda (&optional frame minibuf window)
+             (if (and vcf-test--active (vcf-test-frame-p frame))
+                 mock-window-list
+               (funcall orig-window-list frame minibuf window))))
+          ((symbol-function 'window-minibuffer-p)
+           (lambda (&optional w)
+             (if (vcf-test-win-p w)
+                 (eq w mb-win)
+               (funcall orig-window-minibuffer-p w))))
           ((symbol-function 'set-window-fringes)
            (lambda (w &rest args)
              (unless (vcf-test-win-p w)
@@ -570,6 +589,82 @@
                   (should-not (frame-parameter f 'alpha-background)))
                 (run-hooks 'minibuffer-exit-hook))))
         (vertico-child-frame-mode -1)))))
+
+(ert-deftest vcf-test-other-window-poshandlers ()
+  (vcf-test-with-mock-gui
+    (let ((vertico-child-frame-top-offset 0.12)
+          (vertico-child-frame-margin '(16 . 16))
+          (vertico-child-frame-offset '(0 . 0))
+          (vertico-child-frame-recursive-offset '(24 . 24))
+          (sidebar-win (make-vcf-test-win
+                        :frame parent-frame
+                        :width 20
+                        :height 40
+                        :pixel-h 800
+                        :edges '(0 0 200 800)
+                        :params '((no-other-window . t))))
+          (other-win (make-vcf-test-win
+                      :frame parent-frame
+                      :width 60
+                      :height 30
+                      :pixel-h 600
+                      :edges '(600 100 1200 700))))
+      (setf (vcf-test-win-edges parent-win) '(0 0 600 800))
+      ;; With sidebar (no-other-window), mb-win, and other-win in window-list,
+      ;; other-window-* skips parent-win, mb-win, and sidebar-win.
+      (setq mock-window-list (list parent-win mb-win sidebar-win other-win))
+      (should (equal (vertico-child-frame-poshandler-other-window-center
+                      parent-frame 300 200)
+                     '(750 . 300)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-center
+                      parent-frame 300 200)
+                     '(750 . 172)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-left-corner
+                      parent-frame 300 200)
+                     '(600 . 100)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-right-corner
+                      parent-frame 300 200)
+                     '(900 . 100)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-center
+                      parent-frame 300 200)
+                     '(750 . 500)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-left-corner
+                      parent-frame 300 200)
+                     '(600 . 500)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-right-corner
+                      parent-frame 300 200)
+                     '(900 . 500)))
+      ;; Symbolic shorthand resolves via --compute-geometry
+      (let ((vertico-child-frame-poshandler 'other-window-center)
+            (vertico-child-frame-width 30)
+            (vertico-child-frame-min-width nil)
+            (vertico-child-frame-resize nil)
+            (vertico-count 9))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 9 1)
+                       '(750 300 300 200))))
+      ;; Single-window frame falls back to window-* (selected window)
+      (setq mock-window-list (list parent-win))
+      (should (equal (vertico-child-frame-poshandler-other-window-center
+                      parent-frame 300 200)
+                     '(150 . 300)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-center
+                      parent-frame 300 200)
+                     '(150 . 96)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-left-corner
+                      parent-frame 300 200)
+                     '(0 . 0)))
+      (should (equal (vertico-child-frame-poshandler-other-window-top-right-corner
+                      parent-frame 300 200)
+                     '(300 . 0)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-center
+                      parent-frame 300 200)
+                     '(150 . 600)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-left-corner
+                      parent-frame 300 200)
+                     '(0 . 600)))
+      (should (equal (vertico-child-frame-poshandler-other-window-bottom-right-corner
+                      parent-frame 300 200)
+                     '(300 . 600))))))
 
 ;;;; Fallback tests
 

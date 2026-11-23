@@ -11,7 +11,7 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 | External dependencies | None (only `vertico`) | `posframe` | None (wraps `vertico-buffer`) |
 | Frame reuse | Per-depth frame pool | Single `posframe` buffer/frame | `display-buffer-in-child-frame` |
 | Geometry caching | Skips no-op move/resize calls | Re-evaluates per update | Re-evaluates via `display-buffer` |
-| Positioning | 20 poshandlers (frame, window, point) + shorthand + offset | `posframe-poshandler-*` | `display-buffer-in-child-frame` |
+| Positioning | 27 poshandlers (frame, window, other-window, point) + shorthand + offset | `posframe-poshandler-*` | `display-buffer-in-child-frame` |
 | Sizing controls | Width/height (ratio, cols/lines, fn), min/max bounds, resize modes | Width/height/min-width/min-height | `display-buffer` sizing |
 | Recursive minibuffers | Depth-indexed pool + cascade offset + outer re-raise | Overlapping / focus quirks | Window layout interference |
 | Long-path stability | `truncate-lines`, `auto-hscroll-mode 'current-line`, `resize-mini-windows nil` | Known `C-x C-f` jitter & clipping | Inherits buffer window wrapping |
@@ -154,6 +154,18 @@ Leave `vertico-child-frame-fallback-mode` as `nil` to fall back to the standard 
 - `window-bottom-center` / `vertico-child-frame-poshandler-window-bottom-center`
 - `window-bottom-left-corner` / `vertico-child-frame-poshandler-window-bottom-left-corner`
 - `window-bottom-right-corner` / `vertico-child-frame-poshandler-window-bottom-right-corner`
+
+### Other-window-relative (splits without obscuring the active window)
+
+Positions relative to the next regular window on the parent frame (skipping `no-other-window` sidebars and the minibuffer), falling back to the corresponding `window-*` poshandler in a single-window frame:
+
+- `other-window-center` / `vertico-child-frame-poshandler-other-window-center`
+- `other-window-top-center` / `vertico-child-frame-poshandler-other-window-top-center`
+- `other-window-top-left-corner` / `vertico-child-frame-poshandler-other-window-top-left-corner`
+- `other-window-top-right-corner` / `vertico-child-frame-poshandler-other-window-top-right-corner`
+- `other-window-bottom-center` / `vertico-child-frame-poshandler-other-window-bottom-center`
+- `other-window-bottom-left-corner` / `vertico-child-frame-poshandler-other-window-bottom-left-corner`
+- `other-window-bottom-right-corner` / `vertico-child-frame-poshandler-other-window-bottom-right-corner`
 
 ### Point / Cursor-relative
 
