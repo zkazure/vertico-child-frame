@@ -364,7 +364,9 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
     (no-special-glyphs . t)
     (desktop-dont-save . t)
     (inhibit-double-buffering . nil)
-    (skip-taskbar . t))
+    (skip-taskbar . t)
+    (user-position . t)
+    (user-size . t))
   "Default frame parameters for Vertico child frames.")
 
 (defvar vertico-child-frame--pool nil
@@ -1040,13 +1042,24 @@ Falls back to PARENT center if point position is unavailable."
 
 (defun vertico-child-frame--apply-geometry (frame geometry)
   "Apply GEOMETRY (X Y WIDTH HEIGHT) to FRAME if changed."
-  (unless (equal geometry (frame-parameter frame 'vertico-child-frame--geometry))
-    (pcase-let ((`(,x ,y ,width ,height) geometry))
+  (pcase-let* ((`(,x ,y ,width ,height) geometry)
+               (cached (frame-parameter frame 'vertico-child-frame--geometry))
+               (size-changed (not (equal (cddr geometry) (cddr cached))))
+               (pos-changed (or (not (equal (list x y)
+                                            (list (car cached) (cadr cached))))
+                                (not (equal (frame-position frame)
+                                            (cons x y))))))
+    (when (or size-changed pos-changed)
       (let ((frame-resize-pixelwise t)
             (frame-inhibit-implied-resize t)
             (vertico-child-frame--resizing t))
-        (set-frame-size frame width height t)
-        (set-frame-position frame x y)
+        (when size-changed
+          (set-frame-size frame width height t))
+        (when pos-changed
+          (modify-frame-parameters frame `((left . (+ ,x))
+                                           (top . (+ ,y))
+                                           (user-position . t)))
+          (set-frame-position frame x y))
         (set-frame-parameter frame 'vertico-child-frame--geometry geometry)))))
 
 (defun vertico-child-frame--on-delete-frame (deleted)
@@ -1217,14 +1230,17 @@ child frame immediately."
           (vertico-child-frame--apply-geometry
            frame (vertico-child-frame--compute-geometry parent vertico-count depth))
           (vertico-child-frame--update-truncation win)
-          (vertico-child-frame--apply-geometry
-           frame (vertico-child-frame--compute-geometry parent vertico-count depth))
-          (cl-pushnew (current-buffer) vertico-child-frame--active-buffers :test #'eq)
-          (setq vertico-child-frame--active-frames
-                (cons (cons depth frame)
-                      (assq-delete-all depth vertico-child-frame--active-frames)))
-          (make-frame-visible frame)
-          (raise-frame frame)
+          (let ((geometry (vertico-child-frame--compute-geometry
+                           parent vertico-count depth)))
+            (vertico-child-frame--apply-geometry frame geometry)
+            (cl-pushnew (current-buffer) vertico-child-frame--active-buffers :test #'eq)
+            (setq vertico-child-frame--active-frames
+                  (cons (cons depth frame)
+                        (assq-delete-all depth vertico-child-frame--active-frames)))
+            (make-frame-visible frame)
+            (raise-frame frame)
+            ;; Re-verify after mapping in case GTK/WM repositioned the frame.
+            (vertico-child-frame--apply-geometry frame geometry))
           (vertico-child-frame--update-cursor)
           (when (window-live-p win)
             (set-window-point win (point)))

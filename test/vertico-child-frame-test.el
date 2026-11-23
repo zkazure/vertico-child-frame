@@ -69,6 +69,7 @@
           (orig-frame-width (symbol-function 'frame-width))
           (orig-frame-height (symbol-function 'frame-height))
           (orig-frame-parameter (symbol-function 'frame-parameter))
+          (orig-frame-position (symbol-function 'frame-position))
           (orig-set-frame-parameter (symbol-function 'set-frame-parameter))
           (orig-modify-frame-parameters (symbol-function 'modify-frame-parameters))
           (orig-window-live-p (symbol-function 'window-live-p))
@@ -153,6 +154,11 @@
              (if (vcf-test-frame-p f)
                  (alist-get param (vcf-test-frame-params f))
                (funcall orig-frame-parameter f param))))
+          ((symbol-function 'frame-position)
+           (lambda (&optional f)
+             (if (vcf-test-frame-p f)
+                 (or (vcf-test-frame-pos f) '(0 . 0))
+               (funcall orig-frame-position f))))
           ((symbol-function 'set-frame-parameter)
            (lambda (f param val)
              (if (vcf-test-frame-p f)
@@ -956,6 +962,38 @@
                 (should (= (frame-pixel-width f) 480)))
               (run-hooks 'minibuffer-exit-hook)))
         (vertico-child-frame-mode -1)))))
+
+(ert-deftest vcf-test-wm-position-drift-recovery ()
+  (vcf-test-with-mock-gui
+    ;; Default frame parameters advertise user-position & user-size for WMs.
+    (should (eq (alist-get 'user-position vertico-child-frame--default-parameters) t))
+    (should (eq (alist-get 'user-size vertico-child-frame--default-parameters) t))
+    (let ((vertico-child-frame-width 0.6)
+          (vertico-child-frame-poshandler 'frame-top-center)
+          (vertico-child-frame-top-offset nil))
+      ;; Simulate a WM/GTK centering the frame when make-frame-visible runs.
+      (let ((orig-visible (symbol-function 'make-frame-visible)))
+        (cl-letf (((symbol-function 'make-frame-visible)
+                   (lambda (&optional f)
+                     (funcall orig-visible f)
+                     (when (vcf-test-frame-p f)
+                       (setf (vcf-test-frame-pos f) '(231 . 289))))))
+          (vertico-child-frame-mode 1)
+          (unwind-protect
+              (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                        ((symbol-function 'minibuffer-depth) (lambda () 1)))
+                (with-temp-buffer
+                  (setf (vcf-test-win-buffer mb-win) (current-buffer))
+                  (vertico--setup)
+                  ;; Post-map verification snaps it back from (231 . 289) to (231 . 16)
+                  (should (equal (frame-position vertico-child-frame--frame)
+                                 '(231 . 16)))
+                  (should (equal (frame-parameter vertico-child-frame--frame 'left)
+                                 '(+ 231)))
+                  (should (equal (frame-parameter vertico-child-frame--frame 'top)
+                                 '(+ 16)))
+                  (run-hooks 'minibuffer-exit-hook)))
+            (vertico-child-frame-mode -1)))))))
 
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here
