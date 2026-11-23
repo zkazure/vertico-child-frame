@@ -85,19 +85,20 @@
   "Face whose background specifies the child-frame border color."
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-width 0.6
+(defcustom vertico-child-frame-width nil
   "Width of the Vertico child frame.
-If nil, default to 0.6 of the parent frame pixel width.
-A float in (0.0, 1.0] specifies a fraction of the parent frame pixel
-width.  An integer specifies the width in columns.  A function is called
-with the parent frame and must return pixel width."
-  :type '(choice (const :tag "Default (0.6 of parent)" nil)
+If nil, default to 0.62 of the parent frame pixel width (capped to the
+target window width when using `window-*' or `other-window-*'
+poshandlers).  A float in (0.0, 1.0] specifies a fraction of the parent
+frame pixel width.  An integer specifies the width in columns.  A
+function is called with the parent frame and must return pixel width."
+  :type '(choice (const :tag "Auto (0.62 of parent frame)" nil)
                  (float :tag "Fraction of parent frame")
                  (integer :tag "Columns")
                  (function :tag "Function returning pixel width"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-min-width 50
+(defcustom vertico-child-frame-min-width nil
   "Minimum child-frame width, or nil for no minimum.
 An integer specifies columns; a float in (0.0, 1.0] specifies a fraction
 of the parent frame pixel width."
@@ -106,7 +107,7 @@ of the parent frame pixel width."
                  (integer :tag "Columns"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-max-width 120
+(defcustom vertico-child-frame-max-width nil
   "Maximum child-frame width, or nil for no maximum.
 An integer specifies columns; a float in (0.0, 1.0] specifies a fraction
 of the parent frame pixel width."
@@ -148,13 +149,21 @@ of the parent frame pixel height."
                  (integer :tag "Lines"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-max-height 0.5
+(defcustom vertico-child-frame-max-height nil
   "Maximum child-frame height, or nil for no maximum.
 A float in (0.0, 1.0] specifies a fraction of the parent frame pixel
 height.  An integer specifies the maximum number of lines."
   :type '(choice (const :tag "None" nil)
                  (float :tag "Fraction of parent frame")
                  (integer :tag "Lines"))
+  :group 'vertico-child-frame)
+
+(defcustom vertico-child-frame-size-function #'vertico-child-frame-get-size
+  "Function returning sizing properties for the Vertico child frame.
+It is called with no arguments and must return a plist supporting
+`:width', `:height', `:min-width', `:max-width', `:min-height', and
+`:max-height', matching `vertico-posframe-size-function'."
+  :type 'function
   :group 'vertico-child-frame)
 
 (defcustom vertico-child-frame-poshandler
@@ -249,10 +258,16 @@ An integer specifies pixels."
                  (integer :tag "Pixels"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-margin '(16 . 16)
+(defcustom vertico-child-frame-margin '(0 . 0)
   "Minimum horizontal and vertical margin from parent frame edges in pixels."
   :type '(cons (integer :tag "Horizontal")
                (integer :tag "Vertical"))
+  :group 'vertico-child-frame)
+
+(defcustom vertico-child-frame-bottom-respect-mode-line t
+  "When non-nil, bottom poshandlers clear the mode-line and minibuffer.
+Only applies when `vertico-child-frame-bottom-offset' is nil."
+  :type 'boolean
   :group 'vertico-child-frame)
 
 (defcustom vertico-child-frame-recursive-offset '(24 . 24)
@@ -484,26 +499,78 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
              (* 2 border))
           (* 2 border))))
 
-(defun vertico-child-frame--resolve-width (parent)
-  "Compute child-frame text width in pixels for PARENT."
+(defun vertico-child-frame-get-size ()
+  "Return the default sizing plist for `vertico-child-frame-size-function'."
+  (list :width vertico-child-frame-width
+        :height vertico-child-frame-height
+        :min-width vertico-child-frame-min-width
+        :max-width vertico-child-frame-max-width
+        :min-height vertico-child-frame-min-height
+        :max-height vertico-child-frame-max-height))
+
+(defun vertico-child-frame--size-option (size-plist key fallback)
+  "Read KEY from SIZE-PLIST if present, otherwise return FALLBACK."
+  (if (and size-plist (plist-member size-plist key))
+      (plist-get size-plist key)
+    fallback))
+
+(defun vertico-child-frame--target-window-max-width (parent)
+  "Return pixel width of target window on PARENT when narrower than PARENT."
+  (let* ((fn (vertico-child-frame--resolve-poshandler
+              vertico-child-frame-poshandler))
+         (win (cond
+               ((memq fn '(vertico-child-frame-poshandler-window-center
+                           vertico-child-frame-poshandler-window-top-center
+                           vertico-child-frame-poshandler-window-top-left-corner
+                           vertico-child-frame-poshandler-window-top-right-corner
+                           vertico-child-frame-poshandler-window-bottom-center
+                           vertico-child-frame-poshandler-window-bottom-left-corner
+                           vertico-child-frame-poshandler-window-bottom-right-corner))
+                (vertico-child-frame--selected-window parent))
+               ((memq fn '(vertico-child-frame-poshandler-other-window-center
+                           vertico-child-frame-poshandler-other-window-top-center
+                           vertico-child-frame-poshandler-other-window-top-left-corner
+                           vertico-child-frame-poshandler-other-window-top-right-corner
+                           vertico-child-frame-poshandler-other-window-bottom-center
+                           vertico-child-frame-poshandler-other-window-bottom-left-corner
+                           vertico-child-frame-poshandler-other-window-bottom-right-corner))
+                (or (vertico-child-frame--other-window parent)
+                    (vertico-child-frame--selected-window parent))))))
+    (when (window-live-p win)
+      (pcase-let ((`(,left ,_top ,right ,_bottom) (window-pixel-edges win)))
+        (let ((win-w (- right left)))
+          (when (< win-w (frame-pixel-width parent))
+            win-w))))))
+
+(defun vertico-child-frame--resolve-width (parent &optional size-plist)
+  "Compute child-frame text width in pixels for PARENT using SIZE-PLIST."
   (let* ((cw (max 1 (frame-char-width parent)))
          (pw (max cw (frame-pixel-width parent)))
          (chrome-w (car (vertico-child-frame--chrome-size)))
          (margin-x (max 0 (car vertico-child-frame-margin)))
          (avail-w (if (> pw (* 2 margin-x)) (- pw (* 2 margin-x)) pw))
          (max-parent-px (max cw (- avail-w chrome-w)))
-         (spec vertico-child-frame-width)
+         (spec (vertico-child-frame--size-option
+                size-plist :width vertico-child-frame-width))
+         (min-spec (vertico-child-frame--size-option
+                    size-plist :min-width vertico-child-frame-min-width))
+         (max-spec (vertico-child-frame--size-option
+                    size-plist :max-width vertico-child-frame-max-width))
          (raw-px
           (cond
            ((functionp spec) (round (funcall spec parent)))
            ((and (floatp spec) (<= spec 1.0) (> spec 0.0))
             (round (* pw spec)))
            ((integerp spec) (* (max 1 spec) cw))
-           (t (round (* pw 0.6)))))
-         (min-px (vertico-child-frame--resolve-bound
-                  vertico-child-frame-min-width pw cw cw))
+           (t
+            (let ((auto-w (round (* pw 0.62)))
+                  (win-w (vertico-child-frame--target-window-max-width parent)))
+              (if win-w
+                  (min auto-w (max cw (- win-w (* 2 margin-x) chrome-w)))
+                auto-w)))))
+         (min-px (vertico-child-frame--resolve-bound min-spec pw cw cw))
          (max-px (vertico-child-frame--resolve-bound
-                  vertico-child-frame-max-width pw cw max-parent-px))
+                  max-spec pw cw max-parent-px))
          (upper (max cw (min max-px max-parent-px)))
          (lower (min min-px upper)))
     (max lower (min upper raw-px))))
@@ -545,8 +612,9 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
         (setq total (+ total (max 1 (ceiling (max 1 (1+ (string-width line))) cols)))))
       (max 1 total))))
 
-(defun vertico-child-frame--resolve-height (parent lines &optional prompt-lines)
-  "Compute child-frame height in pixels on PARENT for LINES and PROMPT-LINES."
+(defun vertico-child-frame--resolve-height
+    (parent lines &optional prompt-lines size-plist)
+  "Compute child-frame height on PARENT for LINES, PROMPT-LINES, and SIZE-PLIST."
   (let* ((lh (max 1 (frame-char-height parent)))
          (ph (max lh (frame-pixel-height parent)))
          (chrome-h (cdr (vertico-child-frame--chrome-size)))
@@ -555,7 +623,12 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
          (max-parent-px (max lh (- avail-h chrome-h)))
          (pl (max 1 (or prompt-lines 1)))
          (prompt-plus-lines (max 1 (+ pl lines)))
-         (hspec vertico-child-frame-height)
+         (hspec (vertico-child-frame--size-option
+                 size-plist :height vertico-child-frame-height))
+         (min-spec (vertico-child-frame--size-option
+                    size-plist :min-height vertico-child-frame-min-height))
+         (max-spec (vertico-child-frame--size-option
+                    size-plist :max-height vertico-child-frame-max-height))
          (raw-px
           (cond
            ((functionp hspec) (round (funcall hspec parent lines)))
@@ -571,11 +644,10 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
                              prompt-plus-lines)))
                  (_ prompt-plus-lines))
                lh))))
-         (min-px (vertico-child-frame--resolve-bound
-                  vertico-child-frame-min-height ph lh lh))
+         (min-px (vertico-child-frame--resolve-bound min-spec ph lh lh))
          (max-px (min max-parent-px
                       (vertico-child-frame--resolve-bound
-                       vertico-child-frame-max-height ph lh max-parent-px)))
+                       max-spec ph lh max-parent-px)))
          (upper (max lh max-px))
          (lower (min min-px upper)))
     (max lower (min upper raw-px))))
@@ -603,25 +675,68 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
     (round (* dim offset)))
    (t (round offset))))
 
-(defun vertico-child-frame--selected-window-edges (parent)
-  "Return pixel edges of the selected window if it belongs to PARENT."
+(defun vertico-child-frame--selected-window (parent)
+  "Return the selected window if it belongs to PARENT."
   (let ((win (minibuffer-selected-window)))
     (when (and (window-live-p win) (eq (window-frame win) parent))
-      (window-pixel-edges win))))
+      win)))
 
-(defun vertico-child-frame--other-window-edges (parent)
-  "Return pixel edges of another regular window on PARENT, or nil."
+(defun vertico-child-frame--selected-window-edges (parent)
+  "Return pixel edges of the selected window if it belongs to PARENT."
+  (when-let* ((win (vertico-child-frame--selected-window parent)))
+    (window-pixel-edges win)))
+
+(defun vertico-child-frame--other-window (parent)
+  "Return another regular window on PARENT, or nil."
   (let ((selected (minibuffer-selected-window)))
     (cl-loop for win in (window-list parent 'no-minibuf selected)
              when (and (not (eq win selected))
                        (window-live-p win)
                        (not (window-minibuffer-p win))
                        (not (window-parameter win 'no-other-window)))
-             return (window-pixel-edges win))))
+             return win)))
 
-(defun vertico-child-frame--position-in-edges (anchor edges width height)
-  "Compute (X . Y) for ANCHOR inside pixel EDGES for WIDTH by HEIGHT."
-  (pcase-let ((`(,left ,top ,right ,bottom) edges))
+(defun vertico-child-frame--other-window-edges (parent)
+  "Return pixel edges of another regular window on PARENT, or nil."
+  (when-let* ((win (vertico-child-frame--other-window parent)))
+    (window-pixel-edges win)))
+
+(defun vertico-child-frame--window-mode-line-height (win)
+  "Return the mode-line pixel height of WIN, or 0."
+  (if (and (window-live-p win) (fboundp 'window-mode-line-height))
+      (window-mode-line-height win)
+    0))
+
+(defun vertico-child-frame--frame-bottom-inset (parent)
+  "Return bottom inset in pixels on PARENT for bottom-aligned poshandlers."
+  (if vertico-child-frame-bottom-offset
+      (vertico-child-frame--resolve-offset
+       vertico-child-frame-bottom-offset (frame-pixel-height parent))
+    (+ (max 0 (cdr vertico-child-frame-margin))
+       (if vertico-child-frame-bottom-respect-mode-line
+           (+ (let ((mb (minibuffer-window parent)))
+                (if (and (window-live-p mb) (eq (window-frame mb) parent))
+                    (window-pixel-height mb)
+                  0))
+              (vertico-child-frame--window-mode-line-height
+               (vertico-child-frame--selected-window parent)))
+         0))))
+
+(defun vertico-child-frame--window-bottom-inset (win win-h)
+  "Return bottom inset in pixels on WIN of pixel height WIN-H."
+  (if vertico-child-frame-bottom-offset
+      (vertico-child-frame--resolve-offset
+       vertico-child-frame-bottom-offset win-h)
+    (+ (max 0 (cdr vertico-child-frame-margin))
+       (if vertico-child-frame-bottom-respect-mode-line
+           (vertico-child-frame--window-mode-line-height win)
+         0))))
+
+(defun vertico-child-frame--position-in-edges (anchor edges width height &optional win)
+  "Compute (X . Y) for ANCHOR in pixel EDGES of WIN for WIDTH by HEIGHT."
+  (pcase-let ((`(,left ,top ,right ,bottom) edges)
+              (mx (max 0 (car vertico-child-frame-margin)))
+              (my (max 0 (cdr vertico-child-frame-margin))))
     (pcase anchor
       ('center
        (cons (+ left (round (/ (- (- right left) width) 2.0)))
@@ -632,15 +747,20 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
          (cons (+ left (round (/ (- win-w width) 2.0)))
                (+ top (vertico-child-frame--resolve-offset
                        vertico-child-frame-top-offset win-h)))))
-      ('top-left-corner (cons left top))
-      ('top-right-corner (cons (- right width) top))
+      ('top-left-corner (cons (+ left mx) (+ top my)))
+      ('top-right-corner (cons (- right width mx) (+ top my)))
       ('bottom-center
        (cons (+ left (round (/ (- (- right left) width) 2.0)))
              (- bottom height
-                (vertico-child-frame--resolve-offset
-                 vertico-child-frame-bottom-offset (- bottom top)))))
-      ('bottom-left-corner (cons left (- bottom height)))
-      ('bottom-right-corner (cons (- right width) (- bottom height))))))
+                (vertico-child-frame--window-bottom-inset win (- bottom top)))))
+      ('bottom-left-corner
+       (cons (+ left mx)
+             (- bottom height
+                (vertico-child-frame--window-bottom-inset win (- bottom top)))))
+      ('bottom-right-corner
+       (cons (- right width mx)
+             (- bottom height
+                (vertico-child-frame--window-bottom-inset win (- bottom top))))))))
 
 (defun vertico-child-frame--point-pixel-position (parent)
   "Return (X Y LINE-HEIGHT) in pixels for point in selected window on PARENT."
@@ -686,12 +806,10 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
 
 (defun vertico-child-frame-poshandler-frame-bottom-center (parent width height)
   "Position child frame of WIDTH by HEIGHT near bottom center of PARENT."
-  (let* ((ph (frame-pixel-height parent))
-         (offset (vertico-child-frame--resolve-offset
-                  vertico-child-frame-bottom-offset ph))
-         (x (round (/ (- (frame-pixel-width parent) width) 2.0)))
-         (y (- ph height offset)))
-    (cons x y)))
+  (cons (round (/ (- (frame-pixel-width parent) width) 2.0))
+        (- (frame-pixel-height parent)
+           height
+           (vertico-child-frame--frame-bottom-inset parent))))
 
 (defalias 'vertico-child-frame-poshandler-bottom-center
   #'vertico-child-frame-poshandler-frame-bottom-center)
@@ -709,12 +827,16 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
 (defun vertico-child-frame-poshandler-frame-bottom-left-corner (parent _width height)
   "Position child frame of HEIGHT at the bottom-left corner of PARENT."
   (cons (max 0 (car vertico-child-frame-margin))
-        (- (frame-pixel-height parent) height (max 0 (cdr vertico-child-frame-margin)))))
+        (- (frame-pixel-height parent)
+           height
+           (vertico-child-frame--frame-bottom-inset parent))))
 
 (defun vertico-child-frame-poshandler-frame-bottom-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-right corner of PARENT."
   (cons (- (frame-pixel-width parent) width (max 0 (car vertico-child-frame-margin)))
-        (- (frame-pixel-height parent) height (max 0 (cdr vertico-child-frame-margin)))))
+        (- (frame-pixel-height parent)
+           height
+           (vertico-child-frame--frame-bottom-inset parent))))
 
 (defun vertico-child-frame-poshandler-frame-top-left-or-right-other-corner
     (parent width height)
@@ -731,104 +853,118 @@ otherwise top-left."
 (defun vertico-child-frame-poshandler-window-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at center of selected window.
 Falls back to PARENT center if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'center edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at top center of selected window.
 Falls back to PARENT top center if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-center edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-top-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-left-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-left of selected window.
 Falls back to PARENT top-left if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-left-corner edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-left-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-top-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-top-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-right of selected window.
 Falls back to PARENT top-right if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-right-corner edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-right-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-top-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom center of selected window.
 Falls back to PARENT bottom center if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-center edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-bottom-center parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-left-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-left of selected window.
 Falls back to PARENT bottom-left if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-left-corner edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-left-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-bottom-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-window-bottom-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-right of selected window.
 Falls back to PARENT bottom-right if no selected window belongs to PARENT."
-  (if-let* ((edges (vertico-child-frame--selected-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-right-corner edges width height)
+  (if-let* ((win (vertico-child-frame--selected-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-right-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-frame-bottom-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at center of another window.
 Falls back to selected window center on PARENT if only one window exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'center edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-center parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-top-center (parent width height)
   "Position child frame of WIDTH by HEIGHT at top center of another window.
 Falls back to selected window top center on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-center edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-top-center parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-top-left-corner
     (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-left of another window.
 Falls back to selected window top-left on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-left-corner edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-left-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-top-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-top-right-corner
     (parent width height)
   "Position child frame of WIDTH by HEIGHT at top-right of another window.
 Falls back to selected window top-right on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'top-right-corner edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'top-right-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-top-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-bottom-center
     (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom center of another window.
 Falls back to selected window bottom center on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-center edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-center (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-bottom-center parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-bottom-left-corner
     (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-left of another window.
 Falls back to selected window bottom-left on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-left-corner edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-left-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-bottom-left-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-other-window-bottom-right-corner
     (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-right of another window.
 Falls back to selected window bottom-right on PARENT if none exists."
-  (if-let* ((edges (vertico-child-frame--other-window-edges parent)))
-      (vertico-child-frame--position-in-edges 'bottom-right-corner edges width height)
+  (if-let* ((win (vertico-child-frame--other-window parent)))
+      (vertico-child-frame--position-in-edges
+       'bottom-right-corner (window-pixel-edges win) width height win)
     (vertico-child-frame-poshandler-window-bottom-right-corner parent width height)))
 
 (defun vertico-child-frame-poshandler-point-bottom-left-corner (parent width height)
@@ -925,9 +1061,12 @@ Falls back to PARENT center if point position is unavailable."
 
 (defun vertico-child-frame--compute-geometry (parent lines depth)
   "Compute (X Y WIDTH HEIGHT) for child frame on PARENT with LINES at DEPTH."
-  (let* ((width (vertico-child-frame--resolve-width parent))
+  (let* ((size-plist (when (functionp vertico-child-frame-size-function)
+                       (funcall vertico-child-frame-size-function)))
+         (width (vertico-child-frame--resolve-width parent size-plist))
          (prompt-lines (vertico-child-frame--prompt-lines parent width))
-         (height (vertico-child-frame--resolve-height parent lines prompt-lines))
+         (height (vertico-child-frame--resolve-height
+                  parent lines prompt-lines size-plist))
          (chrome (vertico-child-frame--chrome-size))
          (outer-w (+ width (car chrome)))
          (outer-h (+ height (cdr chrome)))

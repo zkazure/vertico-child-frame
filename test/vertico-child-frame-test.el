@@ -16,7 +16,8 @@
   cols rows visible raised live params pos size)
 
 (cl-defstruct vcf-test-win
-  frame buffer point dedicated width height pixel-h vscroll hscroll edges inside-edges params)
+  frame buffer point dedicated width height pixel-h mode-line-h
+  vscroll hscroll edges inside-edges params)
 
 (defmacro vcf-test-with-mock-gui (&rest body)
   "Evaluate BODY with mocked GUI frames, windows, and display primitives."
@@ -88,6 +89,7 @@
           (orig-set-window-hscroll (symbol-function 'set-window-hscroll))
           (orig-window-width (symbol-function 'window-width))
           (orig-window-pixel-height (symbol-function 'window-pixel-height))
+          (orig-window-mode-line-height (symbol-function 'window-mode-line-height))
           (orig-window-pixel-edges (symbol-function 'window-pixel-edges))
           (orig-window-inside-pixel-edges (symbol-function 'window-inside-pixel-edges))
           (orig-window-point (symbol-function 'window-point))
@@ -317,6 +319,11 @@
              (if (vcf-test-win-p w)
                  (vcf-test-win-pixel-h w)
                (funcall orig-window-pixel-height w))))
+          ((symbol-function 'window-mode-line-height)
+           (lambda (&optional w)
+             (if (vcf-test-win-p w)
+                 (or (vcf-test-win-mode-line-h w) 0)
+               (funcall orig-window-mode-line-height w))))
           ((symbol-function 'window-pixel-edges)
            (lambda (&optional w)
              (if (vcf-test-win-p w)
@@ -449,18 +456,19 @@
           (vertico-child-frame-offset '(0 . 0))
           (vertico-child-frame-recursive-offset '(24 . 24)))
       ;; Symmetric nil defaults match margin (16px from top and 16px from bottom)
-      (should (equal (vertico-child-frame-poshandler-frame-top-center parent-frame 720 220)
-                     '(240 . 16)))
-      (should (equal (vertico-child-frame-poshandler-top-center parent-frame 720 220)
-                     '(240 . 16)))
-      (should (equal (vertico-child-frame-poshandler-frame-center parent-frame 720 220)
-                     '(240 . 290)))
-      (should (equal (vertico-child-frame-poshandler-center parent-frame 720 220)
-                     '(240 . 290)))
-      (should (equal (vertico-child-frame-poshandler-frame-bottom-center parent-frame 720 220)
-                     '(240 . 564)))
-      (should (equal (vertico-child-frame-poshandler-bottom-center parent-frame 720 220)
-                     '(240 . 564)))
+      (let ((vertico-child-frame-bottom-respect-mode-line nil))
+        (should (equal (vertico-child-frame-poshandler-frame-top-center parent-frame 720 220)
+                       '(240 . 16)))
+        (should (equal (vertico-child-frame-poshandler-top-center parent-frame 720 220)
+                       '(240 . 16)))
+        (should (equal (vertico-child-frame-poshandler-frame-center parent-frame 720 220)
+                       '(240 . 290)))
+        (should (equal (vertico-child-frame-poshandler-center parent-frame 720 220)
+                       '(240 . 290)))
+        (should (equal (vertico-child-frame-poshandler-frame-bottom-center parent-frame 720 220)
+                       '(240 . 564)))
+        (should (equal (vertico-child-frame-poshandler-bottom-center parent-frame 720 220)
+                       '(240 . 564))))
       ;; Explicit float offsets
       (let ((vertico-child-frame-top-offset 0.12)
             (vertico-child-frame-bottom-offset 0.06))
@@ -468,14 +476,15 @@
                        '(240 . 96)))
         (should (equal (vertico-child-frame-poshandler-frame-bottom-center parent-frame 720 220)
                        '(240 . 532))))
-      (should (equal (vertico-child-frame-poshandler-frame-top-left-corner parent-frame 400 200)
-                     '(16 . 16)))
-      (should (equal (vertico-child-frame-poshandler-frame-top-right-corner parent-frame 400 200)
-                     '(784 . 16)))
-      (should (equal (vertico-child-frame-poshandler-frame-bottom-left-corner parent-frame 400 200)
-                     '(16 . 584)))
-      (should (equal (vertico-child-frame-poshandler-frame-bottom-right-corner parent-frame 400 200)
-                     '(784 . 584)))
+      (let ((vertico-child-frame-bottom-respect-mode-line nil))
+        (should (equal (vertico-child-frame-poshandler-frame-top-left-corner parent-frame 400 200)
+                       '(16 . 16)))
+        (should (equal (vertico-child-frame-poshandler-frame-top-right-corner parent-frame 400 200)
+                       '(784 . 16)))
+        (should (equal (vertico-child-frame-poshandler-frame-bottom-left-corner parent-frame 400 200)
+                       '(16 . 584)))
+        (should (equal (vertico-child-frame-poshandler-frame-bottom-right-corner parent-frame 400 200)
+                       '(784 . 584))))
       ;; Top-left-or-right-other-corner adapts to selected window side
       (setf (vcf-test-win-edges parent-win) '(0 0 500 800))
       (should (equal (vertico-child-frame-poshandler-frame-top-left-or-right-other-corner
@@ -492,19 +501,20 @@
       (should (equal (vertico-child-frame-poshandler-window-top-center parent-frame 400 200)
                      '(300 . 66)))
       (should (equal (vertico-child-frame-poshandler-window-top-left-corner parent-frame 400 200)
-                     '(100 . 50)))
+                     '(116 . 66)))
       (should (equal (vertico-child-frame-poshandler-window-top-right-corner parent-frame 400 200)
-                     '(500 . 50)))
+                     '(484 . 66)))
       (should (equal (vertico-child-frame-poshandler-window-bottom-center parent-frame 400 200)
                      '(300 . 434)))
       (should (equal (vertico-child-frame-poshandler-window-bottom-left-corner parent-frame 400 200)
-                     '(100 . 450)))
+                     '(116 . 434)))
       (should (equal (vertico-child-frame-poshandler-window-bottom-right-corner parent-frame 400 200)
-                     '(500 . 450)))
+                     '(484 . 434)))
       ;; Geometry accounts for outer chrome (18x2 with default fringes=8, border=1)
       ;; ensuring identical left/right and top/bottom outer pixel gaps.
       (let ((vertico-child-frame-width 0.6)
             (vertico-child-frame-resize nil)
+            (vertico-child-frame-bottom-respect-mode-line nil)
             (vertico-count 10))
         (let* ((vertico-child-frame-poshandler 'frame-top-center)
                (top-geom (vertico-child-frame--compute-geometry parent-frame 10 1))
@@ -561,6 +571,7 @@
             (vertico-child-frame-width 40)
             (vertico-child-frame-min-width nil)
             (vertico-child-frame-resize nil)
+            (vertico-child-frame-bottom-respect-mode-line nil)
             (vertico-count 10)
             (vertico-child-frame-offset '(-10 . -20)))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
@@ -572,7 +583,9 @@
                     ((symbol-function 'minibuffer-depth) (lambda () 1)))
             (with-temp-buffer
               (setf (vcf-test-win-buffer mb-win) (current-buffer))
-              (let ((vertico-child-frame-poshandler 'frame-top-center))
+              (let ((vertico-child-frame-poshandler 'frame-top-center)
+                    (vertico-child-frame-width 0.6)
+                    (vertico-child-frame-bottom-respect-mode-line nil))
                 (vertico--setup)
                 (vertico-child-frame-set-poshandler
                  #'vertico-child-frame-poshandler-frame-bottom-right-corner)
@@ -655,19 +668,19 @@
                      '(750 . 116)))
       (should (equal (vertico-child-frame-poshandler-other-window-top-left-corner
                       parent-frame 300 200)
-                     '(600 . 100)))
+                     '(616 . 116)))
       (should (equal (vertico-child-frame-poshandler-other-window-top-right-corner
                       parent-frame 300 200)
-                     '(900 . 100)))
+                     '(884 . 116)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-center
                       parent-frame 300 200)
                      '(750 . 484)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-left-corner
                       parent-frame 300 200)
-                     '(600 . 500)))
+                     '(616 . 484)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-right-corner
                       parent-frame 300 200)
-                     '(900 . 500)))
+                     '(884 . 484)))
       ;; Symbolic shorthand resolves via --compute-geometry (outer-w=318, outer-h=202)
       (let ((vertico-child-frame-poshandler 'other-window-center)
             (vertico-child-frame-width 30)
@@ -686,19 +699,19 @@
                      '(150 . 16)))
       (should (equal (vertico-child-frame-poshandler-other-window-top-left-corner
                       parent-frame 300 200)
-                     '(0 . 0)))
+                     '(16 . 16)))
       (should (equal (vertico-child-frame-poshandler-other-window-top-right-corner
                       parent-frame 300 200)
-                     '(300 . 0)))
+                     '(284 . 16)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-center
                       parent-frame 300 200)
                      '(150 . 584)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-left-corner
                       parent-frame 300 200)
-                     '(0 . 600)))
+                     '(16 . 584)))
       (should (equal (vertico-child-frame-poshandler-other-window-bottom-right-corner
                       parent-frame 300 200)
-                     '(300 . 600))))))
+                     '(284 . 584))))))
 
 ;;;; Fallback tests
 
@@ -751,8 +764,8 @@
             (should truncate-lines)
             (should (eq auto-hscroll-mode 'current-line))
             (should-not resize-mini-windows)
-            ;; Window width advice reports child-frame width (72 vs 120)
-            (should (= (vertico--window-width) 72))
+            ;; Window width advice reports child-frame width (74 cols for 0.62 * 1200 vs 120)
+            (should (= (vertico--window-width) 74))
             ;; Calling resize with identical height hits geometry cache
             (let ((prev-resizes resize-calls)
                   (prev-moves move-calls))
@@ -969,6 +982,7 @@
     (should (eq (alist-get 'user-position vertico-child-frame--default-parameters) t))
     (should (eq (alist-get 'user-size vertico-child-frame--default-parameters) t))
     (let ((vertico-child-frame-width 0.6)
+          (vertico-child-frame-margin '(16 . 16))
           (vertico-child-frame-poshandler 'frame-top-center)
           (vertico-child-frame-top-offset nil))
       ;; Simulate a WM/GTK centering the frame when make-frame-visible runs.
@@ -994,6 +1008,63 @@
                                  '(+ 16)))
                   (run-hooks 'minibuffer-exit-hook)))
             (vertico-child-frame-mode -1)))))))
+
+(ert-deftest vcf-test-posframe-parity-and-size-function ()
+  (vcf-test-with-mock-gui
+    ;; With posframe-style defaults (margin '(0 . 0), width nil -> 0.62,
+    ;; bottom-respect-mode-line t), top/bottom corners align flush / clear bars.
+    (setf (vcf-test-win-mode-line-h parent-win) 22)
+    (let ((vertico-count 10))
+      ;; Frame top-center flush at y=0, width = round(1200 * 0.62) = 744
+      (let ((vertico-child-frame-poshandler 'frame-top-center))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(219 0 744 220))))
+      ;; Frame top-left-corner flush at (0 . 0)
+      (let ((vertico-child-frame-poshandler 'frame-top-left-corner))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(0 0 744 220))))
+      ;; Frame bottom-center clears minibuffer (20) + mode-line (22) = 42px
+      ;; outer-h = 222 -> y = 800 - 222 - 42 = 536
+      (let ((vertico-child-frame-poshandler 'frame-bottom-center))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(219 536 744 220))))
+      ;; Frame bottom-right-corner clears mode-line + minibuffer and sits flush right
+      (let ((vertico-child-frame-poshandler 'frame-bottom-right-corner))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(438 536 744 220))))
+      ;; Window bottom-center clears that window's mode-line (22px)
+      (setf (vcf-test-win-edges parent-win) '(100 50 900 650))
+      (let ((vertico-child-frame-poshandler 'window-bottom-center))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(119 406 744 220))))
+      ;; Narrow other-window caps auto-width (0.62) so it fits inside that split
+      (let ((other-win (make-vcf-test-win
+                        :frame parent-frame
+                        :width 50
+                        :height 30
+                        :pixel-h 600
+                        :mode-line-h 24
+                        :edges '(600 100 1100 700))))
+        (setf (vcf-test-win-edges parent-win) '(0 0 600 800))
+        (setq mock-window-list (list parent-win other-win))
+        (let ((vertico-child-frame-poshandler 'other-window-bottom-center))
+          ;; other-win width = 500, chrome-w = 18 -> text-w = 482, outer-w = 500
+          ;; y = 700 - 222 (outer-h) - 24 (mode-line) = 454
+          (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                         '(600 454 482 220)))))
+      ;; Custom vertico-child-frame-size-function plist overrides sizing options
+      (let ((vertico-child-frame-poshandler 'frame-center)
+            (vertico-child-frame-size-function
+             (lambda ()
+               (list :width 60
+                     :height 8
+                     :min-width 40
+                     :max-width 90
+                     :min-height 4
+                     :max-height 12))))
+        ;; width=600 (outer=618), height=160 (outer=162) -> (291, 319)
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 20 1)
+                       '(291 319 600 160)))))))
 
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here
