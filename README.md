@@ -137,9 +137,9 @@ Leave `vertico-child-frame-fallback-mode` as `nil` to fall back to the standard 
 
 ### Frame-relative
 
-- `frame-top-center` / `vertico-child-frame-poshandler-frame-top-center` *(default, alias `...-top-center`)* — horizontally centered at `vertico-child-frame-top-offset` (`0.12`)
+- `frame-top-center` / `vertico-child-frame-poshandler-frame-top-center` *(default, alias `...-top-center`)* — horizontally centered at `vertico-child-frame-top-offset` (`nil`, matching vertical margin)
 - `frame-center` / `vertico-child-frame-poshandler-frame-center` *(alias `...-center`)* — dead center of the parent frame
-- `frame-bottom-center` / `vertico-child-frame-poshandler-frame-bottom-center` *(alias `...-bottom-center`)* — horizontally centered near the bottom (`vertico-child-frame-bottom-offset`)
+- `frame-bottom-center` / `vertico-child-frame-poshandler-frame-bottom-center` *(alias `...-bottom-center`)* — horizontally centered near the bottom at `vertico-child-frame-bottom-offset` (`nil`, matching vertical margin)
 - `frame-top-left-corner` / `vertico-child-frame-poshandler-frame-top-left-corner` — top-left corner inside margins
 - `frame-top-right-corner` / `vertico-child-frame-poshandler-frame-top-right-corner` — top-right corner inside margins
 - `frame-bottom-left-corner` / `vertico-child-frame-poshandler-frame-bottom-left-corner` — bottom-left corner inside margins
@@ -193,8 +193,8 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 | `vertico-child-frame-max-height` | `0.5` | Maximum height as float fraction of parent height, line integer, or `nil` |
 | `vertico-child-frame-poshandler` | `#'vertico-child-frame-poshandler-frame-top-center` | Position handler function or short symbol |
 | `vertico-child-frame-offset` | `'(0 . 0)` | Additional pixel offset `(DX . DY)` added after poshandler |
-| `vertico-child-frame-top-offset` | `0.12` | Top offset (fraction or pixels) |
-| `vertico-child-frame-bottom-offset` | `0.06` | Bottom offset (fraction or pixels) |
+| `vertico-child-frame-top-offset` | `nil` | Top offset (`nil` uses vertical `margin`, or fraction / pixels) |
+| `vertico-child-frame-bottom-offset` | `nil` | Bottom offset (`nil` uses vertical `margin`, or fraction / pixels) |
 | `vertico-child-frame-margin` | `'(16 . 16)` | Edge margin `(x . y)` in pixels |
 | `vertico-child-frame-recursive-offset` | `'(24 . 24)` | Cascade offset `(dx . dy)` per recursive level |
 | `vertico-child-frame-font` | `nil` | Explicit font string for the child frame, or `nil` to inherit |

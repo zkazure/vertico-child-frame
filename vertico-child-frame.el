@@ -229,19 +229,23 @@ pixels relative to PARENT."
                (integer :tag "Vertical"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-top-offset 0.12
+(defcustom vertico-child-frame-top-offset nil
   "Vertical top offset for top-center poshandlers.
+If nil, use the vertical value of `vertico-child-frame-margin'.
 A float in [0.0, 1.0) specifies a fraction of parent or window height.
 An integer specifies pixels."
-  :type '(choice (float :tag "Fraction of height")
+  :type '(choice (const :tag "Use vertical margin" nil)
+                 (float :tag "Fraction of height")
                  (integer :tag "Pixels"))
   :group 'vertico-child-frame)
 
-(defcustom vertico-child-frame-bottom-offset 0.06
-  "Vertical bottom offset for `vertico-child-frame-poshandler-frame-bottom-center'.
-A float in [0.0, 1.0) specifies a fraction of parent height.
+(defcustom vertico-child-frame-bottom-offset nil
+  "Vertical bottom offset for bottom-center poshandlers.
+If nil, use the vertical value of `vertico-child-frame-margin'.
+A float in [0.0, 1.0) specifies a fraction of parent or window height.
 An integer specifies pixels."
-  :type '(choice (float :tag "Fraction of height")
+  :type '(choice (const :tag "Use vertical margin" nil)
+                 (float :tag "Fraction of height")
                  (integer :tag "Pixels"))
   :group 'vertico-child-frame)
 
@@ -467,14 +471,25 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
     (* (max 1 spec) unit-px))
    (t default-px)))
 
+(defun vertico-child-frame--chrome-size ()
+  "Return outer frame chrome (WIDTH . HEIGHT) added by borders and fringes."
+  (let ((border (max 0 (if (and (integerp vertico-child-frame-border-width)
+                                (> vertico-child-frame-border-width 0))
+                           vertico-child-frame-border-width
+                         (or vertico-child-frame-internal-border-width 0)))))
+    (cons (+ (max 0 vertico-child-frame-left-fringe)
+             (max 0 vertico-child-frame-right-fringe)
+             (* 2 border))
+          (* 2 border))))
+
 (defun vertico-child-frame--resolve-width (parent)
   "Compute child-frame text width in pixels for PARENT."
   (let* ((cw (max 1 (frame-char-width parent)))
          (pw (max cw (frame-pixel-width parent)))
+         (chrome-w (car (vertico-child-frame--chrome-size)))
          (margin-x (max 0 (car vertico-child-frame-margin)))
-         (max-parent-px (max cw (if (> pw (* 2 margin-x))
-                                    (- pw (* 2 margin-x))
-                                  pw)))
+         (avail-w (if (> pw (* 2 margin-x)) (- pw (* 2 margin-x)) pw))
+         (max-parent-px (max cw (- avail-w chrome-w)))
          (spec vertico-child-frame-width)
          (raw-px
           (cond
@@ -532,10 +547,10 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
   "Compute child-frame height in pixels on PARENT for LINES and PROMPT-LINES."
   (let* ((lh (max 1 (frame-char-height parent)))
          (ph (max lh (frame-pixel-height parent)))
+         (chrome-h (cdr (vertico-child-frame--chrome-size)))
          (margin-y (max 0 (cdr vertico-child-frame-margin)))
-         (max-parent-px (max lh (if (> ph (* 2 margin-y))
-                                    (- ph (* 2 margin-y))
-                                  ph)))
+         (avail-h (if (> ph (* 2 margin-y)) (- ph (* 2 margin-y)) ph))
+         (max-parent-px (max lh (- avail-h chrome-h)))
          (pl (max 1 (or prompt-lines 1)))
          (prompt-plus-lines (max 1 (+ pl lines)))
          (hspec vertico-child-frame-height)
@@ -580,9 +595,11 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
 
 (defun vertico-child-frame--resolve-offset (offset dim)
   "Resolve OFFSET against pixel dimension DIM."
-  (if (and (floatp offset) (< offset 1.0) (>= offset 0.0))
-      (round (* dim offset))
-    (round offset)))
+  (cond
+   ((null offset) (max 0 (cdr vertico-child-frame-margin)))
+   ((and (floatp offset) (< offset 1.0) (>= offset 0.0))
+    (round (* dim offset)))
+   (t (round offset))))
 
 (defun vertico-child-frame--selected-window-edges (parent)
   "Return pixel edges of the selected window if it belongs to PARENT."
@@ -617,7 +634,9 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
       ('top-right-corner (cons (- right width) top))
       ('bottom-center
        (cons (+ left (round (/ (- (- right left) width) 2.0)))
-             (- bottom height)))
+             (- bottom height
+                (vertico-child-frame--resolve-offset
+                 vertico-child-frame-bottom-offset (- bottom top)))))
       ('bottom-left-corner (cons left (- bottom height)))
       ('bottom-right-corner (cons (- right width) (- bottom height))))))
 
@@ -907,15 +926,19 @@ Falls back to PARENT center if point position is unavailable."
   (let* ((width (vertico-child-frame--resolve-width parent))
          (prompt-lines (vertico-child-frame--prompt-lines parent width))
          (height (vertico-child-frame--resolve-height parent lines prompt-lines))
+         (chrome (vertico-child-frame--chrome-size))
+         (outer-w (+ width (car chrome)))
+         (outer-h (+ height (cdr chrome)))
          (fn (vertico-child-frame--resolve-poshandler vertico-child-frame-poshandler))
-         (pos (funcall fn parent width height))
+         (pos (funcall fn parent outer-w outer-h))
          (ox (car vertico-child-frame-offset))
          (oy (cdr vertico-child-frame-offset))
          (level (max 0 (1- (or depth 1))))
          (dx (* level (car vertico-child-frame-recursive-offset)))
          (dy (* level (cdr vertico-child-frame-recursive-offset)))
          (clamped (vertico-child-frame--clamp-position
-                   parent (+ (car pos) ox dx) (+ (cdr pos) oy dy) width height)))
+                   parent (+ (car pos) ox dx) (+ (cdr pos) oy dy)
+                   outer-w outer-h)))
     (list (car clamped) (cdr clamped) width height)))
 
 ;;;; Frame pool and styling
@@ -953,14 +976,19 @@ Falls back to PARENT center if point position is unavailable."
          (alpha-pair (if (consp vertico-child-frame-alpha)
                          vertico-child-frame-alpha
                        (alist-get 'alpha vertico-child-frame-parameters)))
+         (border-width (if (and (integerp vertico-child-frame-border-width)
+                                (zerop vertico-child-frame-border-width)
+                                (integerp vertico-child-frame-internal-border-width)
+                                (> vertico-child-frame-internal-border-width 0))
+                           nil
+                         vertico-child-frame-border-width))
          (params (delq nil
                        (list (when font (cons 'font font))
                              (when bg (cons 'background-color bg))
                              (when fg (cons 'foreground-color fg))
                              (cons 'alpha-background alpha-bg)
                              (cons 'alpha alpha-pair)
-                             (cons 'child-frame-border-width
-                                   vertico-child-frame-border-width)
+                             (cons 'child-frame-border-width border-width)
                              (cons 'internal-border-width
                                    vertico-child-frame-internal-border-width)))))
     (let ((frame-inhibit-implied-resize t))
