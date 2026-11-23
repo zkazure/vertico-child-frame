@@ -14,7 +14,8 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 | Positioning | 27 poshandlers (frame, window, other-window, point) + shorthand + offset | `posframe-poshandler-*` | `display-buffer-in-child-frame` |
 | Sizing controls | Width/height (ratio, cols/lines, fn), min/max bounds, resize modes | Width/height/min-width/min-height | `display-buffer` sizing |
 | Recursive minibuffers | Depth-indexed pool + cascade offset + outer re-raise | Overlapping / focus quirks | Window layout interference |
-| Long-path stability | `truncate-lines`, `auto-hscroll-mode 'current-line`, `resize-mini-windows nil` | Known `C-x C-f` jitter & clipping | Inherits buffer window wrapping |
+| Long-path stability | Auto-wrapping (`'auto`), `auto-hscroll-mode 'current-line`, `resize-mini-windows nil` | Known `C-x C-f` jitter & clipping | Inherits buffer window wrapping |
+| Parent resize adaptation | Live resize & re-center via `window-size-change-functions` | Static until next update | Static until next update |
 | Marginalia / grid width | Advises `vertico--window-width` to child frame | Needs workarounds / mismatches | Uses buffer window width |
 | Default placement | Top-center command palette (keeps Consult preview clear) | Center of frame (blocks previews) | Buffer-dependent |
 | `vertico-multiform` + TTY fallback | Native toggle (`M-C`) + automatic fallback mode | Manual `vertico-multiform` setup | Tied to `vertico-buffer-mode` |
@@ -205,7 +206,7 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 | `vertico-child-frame-mode-line-format` | `nil` | `mode-line-format` inside the child frame |
 | `vertico-child-frame-header-line-format` | `nil` | `header-line-format` inside the child frame |
 | `vertico-child-frame-hide-minibuffer` | `t` | Hide prompt inside parent minibuffer window |
-| `vertico-child-frame-truncate-lines` | `t` | Truncate long lines inside the child frame |
+| `vertico-child-frame-truncate-lines` | `'auto` | `'auto` (auto-wrap long input), `nil` (always wrap), or `t` (always truncate) |
 | `vertico-child-frame-min-parent-width` | `40` | Minimum parent frame columns |
 | `vertico-child-frame-min-parent-height` | `10` | Minimum parent frame rows |
 | `vertico-child-frame-fallback-mode` | `nil` | Optional fallback Vertico mode for TTY / small frames |

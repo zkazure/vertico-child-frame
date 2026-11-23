@@ -16,7 +16,7 @@
   cols rows visible raised live params pos size)
 
 (cl-defstruct vcf-test-win
-  frame buffer point dedicated width height pixel-h vscroll edges inside-edges params)
+  frame buffer point dedicated width height pixel-h vscroll hscroll edges inside-edges params)
 
 (defmacro vcf-test-with-mock-gui (&rest body)
   "Evaluate BODY with mocked GUI frames, windows, and display primitives."
@@ -84,6 +84,7 @@
           (orig-set-window-fringes (symbol-function 'set-window-fringes))
           (orig-set-window-point (symbol-function 'set-window-point))
           (orig-set-window-vscroll (symbol-function 'set-window-vscroll))
+          (orig-set-window-hscroll (symbol-function 'set-window-hscroll))
           (orig-window-width (symbol-function 'window-width))
           (orig-window-pixel-height (symbol-function 'window-pixel-height))
           (orig-window-pixel-edges (symbol-function 'window-pixel-edges))
@@ -294,6 +295,11 @@
              (if (vcf-test-win-p w)
                  (setf (vcf-test-win-vscroll w) v)
                (funcall orig-set-window-vscroll w v p))))
+          ((symbol-function 'set-window-hscroll)
+           (lambda (w h)
+             (if (vcf-test-win-p w)
+                 (setf (vcf-test-win-hscroll w) h)
+               (funcall orig-set-window-hscroll w h))))
           ((symbol-function 'window-width)
            (lambda (&optional w)
              (cond
@@ -831,6 +837,103 @@
               (should-not (vcf-test-frame-live child))
               (should-not vertico-child-frame--pool))))
       (vertico-child-frame-mode -1))))
+
+(ert-deftest vcf-test-auto-wrap-and-fixed-width ()
+  (vcf-test-with-mock-gui
+    (let ((vertico-count 5)
+          (vertico-child-frame-width 0.6)
+          (vertico-child-frame-min-width 50)
+          (vertico-child-frame-max-width 120)
+          (vertico-child-frame-max-height nil)
+          (vertico-child-frame-resize nil))
+      ;; 'auto keeps truncate-lines t for short prompts, wraps long input
+      ;; without widening the child frame, and expands height for wrapped lines
+      (vertico-child-frame-mode 1)
+      (unwind-protect
+          (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                    ((symbol-function 'minibuffer-depth) (lambda () 1)))
+            (with-temp-buffer
+              (insert "Find file: foo")
+              (setf (vcf-test-win-buffer mb-win) (current-buffer))
+              (vertico--setup)
+              (let ((f vertico-child-frame--frame)
+                    (w vertico-child-frame--window))
+                (should truncate-lines)
+                (should (= (frame-pixel-width f) 720))
+                (should (= (frame-pixel-height f) 120))
+                ;; Insert long ASCII input (> 80% of 72 cols = 57.6 cols)
+                (setf (vcf-test-win-hscroll w) 25)
+                (insert (make-string 140 ?a))
+                (vertico-child-frame--redisplay w)
+                (should-not truncate-lines)
+                (should (= (vcf-test-win-hscroll w) 0))
+                ;; Width remains strictly locked at 720px; height grows for 3 wrapped lines
+                (should (= (frame-pixel-width f) 720))
+                (should (= (frame-pixel-height f) 160))
+                ;; Deleting back to short input re-enables truncate-lines
+                (erase-buffer)
+                (insert "short")
+                (vertico-child-frame--redisplay w)
+                (should truncate-lines)
+                (should (= (frame-pixel-height f) 120))
+                ;; CJK double-width characters trigger wrapping via string-width
+                (erase-buffer)
+                (insert (make-string 35 ?中))
+                (vertico-child-frame--redisplay w)
+                (should-not truncate-lines))
+              (run-hooks 'minibuffer-exit-hook))
+            ;; Explicit nil (always wrap) and t (always truncate)
+            (let ((vertico-child-frame-truncate-lines nil))
+              (with-temp-buffer
+                (insert "hi")
+                (setf (vcf-test-win-buffer mb-win) (current-buffer))
+                (vertico--setup)
+                (should-not truncate-lines)
+                (run-hooks 'minibuffer-exit-hook)))
+            (let ((vertico-child-frame-truncate-lines t))
+              (with-temp-buffer
+                (insert (make-string 140 ?x))
+                (setf (vcf-test-win-buffer mb-win) (current-buffer))
+                (vertico--setup)
+                (should truncate-lines)
+                (run-hooks 'minibuffer-exit-hook))))
+        (vertico-child-frame-mode -1)))))
+
+(ert-deftest vcf-test-parent-resize-adaptation ()
+  (vcf-test-with-mock-gui
+    (let ((vertico-child-frame-width 0.6)
+          (vertico-child-frame-min-width 20)
+          (vertico-child-frame-max-width 120)
+          (vertico-child-frame-poshandler 'frame-top-center)
+          (vertico-child-frame-top-offset 0.12)
+          (vertico-stub--exhibit-called nil))
+      (vertico-child-frame-mode 1)
+      (unwind-protect
+          (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                    ((symbol-function 'minibuffer-depth) (lambda () 1)))
+            (with-temp-buffer
+              (setf (vcf-test-win-buffer mb-win) (current-buffer))
+              (vertico--setup)
+              (let ((f vertico-child-frame--frame))
+                ;; Initial parent 1200x800 -> child width 720, pos (240 . 96)
+                (should (= (frame-pixel-width f) 720))
+                (should (equal (vcf-test-frame-pos f) '(240 . 96)))
+                ;; Resize parent app window to 800x600
+                (setf (vcf-test-frame-pixel-w parent-frame) 800
+                      (vcf-test-frame-pixel-h parent-frame) 600
+                      (vcf-test-frame-cols parent-frame) 80
+                      (vcf-test-frame-rows parent-frame) 30)
+                (setq vertico-stub--exhibit-called nil)
+                (vertico-child-frame--on-window-size-change parent-frame)
+                (should (= (frame-pixel-width f) 480))
+                (should (equal (vcf-test-frame-pos f) '(160 . 72)))
+                (should vertico-stub--exhibit-called)
+                ;; External drift on child frame itself is snapped back to 480px
+                (setf (vcf-test-frame-pixel-w f) 999)
+                (vertico-child-frame--on-window-size-change f)
+                (should (= (frame-pixel-width f) 480)))
+              (run-hooks 'minibuffer-exit-hook)))
+        (vertico-child-frame-mode -1)))))
 
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here
