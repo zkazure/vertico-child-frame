@@ -87,15 +87,32 @@
 
 (defcustom vertico-child-frame-width nil
   "Width of the Vertico child frame.
-If nil, default to 0.62 of the parent frame pixel width (capped to the
-target window width when using `window-*' or `other-window-*'
-poshandlers).  A float in (0.0, 1.0] specifies a fraction of the parent
-frame pixel width.  An integer specifies the width in columns.  A
-function is called with the parent frame and must return pixel width."
-  :type '(choice (const :tag "Auto (0.62 of parent frame)" nil)
+If nil, auto-size width from rendered candidate content when
+`vertico-child-frame-width-resize' is non-nil (falling back to 0.62 of
+the parent frame pixel width before candidates render or when
+`vertico-child-frame-width-resize' is nil, capped to the target window
+width when using `window-*' or `other-window-*' poshandlers).  A float
+in (0.0, 1.0] specifies a fraction of the parent frame pixel width.  An
+integer specifies the width in columns.  A function is called with the
+parent frame and must return pixel width."
+  :type '(choice (const :tag "Auto (fit content or 0.62 of parent)" nil)
                  (float :tag "Fraction of parent frame")
                  (integer :tag "Columns")
                  (function :tag "Function returning pixel width"))
+  :group 'vertico-child-frame)
+
+(defcustom vertico-child-frame-width-resize 'grow-only
+  "How child-frame width adapts to candidate content when width is nil.
+- `grow-only': widen to fit rendered candidates, icons, and tags (up to
+  the parent or target-window bound) without shrinking back down while
+  filtering.
+- t: dynamically widen and shrink on every update to match the current
+  candidates.
+- nil: disable content measurement and use fixed 0.62 parent-frame
+  width."
+  :type '(choice (const :tag "Grow only (no jitter while typing)" grow-only)
+                 (const :tag "Grow and shrink" t)
+                 (const :tag "Fixed (disable content adaptation)" nil))
   :group 'vertico-child-frame)
 
 (defcustom vertico-child-frame-min-width nil
@@ -414,6 +431,12 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
 (defvar-local vertico-child-frame--max-height-seen 0
   "Maximum line count observed so far in `grow-only' resize mode.")
 
+(defvar-local vertico-child-frame--content-measured nil
+  "Non-nil once candidate content has been measured for auto width.")
+
+(defvar-local vertico-child-frame--max-width-seen 0
+  "Maximum text width in pixels observed in `grow-only' width mode.")
+
 (defvar-local vertico-child-frame--last-lines nil
   "Last candidate line count passed to `vertico-child-frame--resize'.")
 
@@ -542,6 +565,23 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
           (when (< win-w (frame-pixel-width parent))
             win-w))))))
 
+(defun vertico-child-frame--candidates-present-p ()
+  "Return non-nil if Vertico has rendered candidates into its overlay."
+  (and (boundp 'vertico--candidates-ov)
+       (overlayp vertico--candidates-ov)
+       (stringp (overlay-get vertico--candidates-ov 'before-string))))
+
+(defun vertico-child-frame--measure-content-size (x-limit)
+  "Return rendered content dimensions in pixels as a cons, or nil.
+X-LIMIT bounds the maximum width measured by `window-text-pixel-size'."
+  (when (and (window-live-p vertico-child-frame--window)
+             (eq (window-buffer vertico-child-frame--window) (current-buffer))
+             (vertico-child-frame--candidates-present-p))
+    (let* ((truncate-lines t)
+           (res (window-text-pixel-size vertico-child-frame--window
+                                        nil nil x-limit)))
+      (and (consp res) res))))
+
 (defun vertico-child-frame--resolve-width (parent &optional size-plist)
   "Compute child-frame text width in pixels for PARENT using SIZE-PLIST."
   (let* ((cw (max 1 (frame-char-width parent)))
@@ -556,24 +596,42 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
                     size-plist :min-width vertico-child-frame-min-width))
          (max-spec (vertico-child-frame--size-option
                     size-plist :max-width vertico-child-frame-max-width))
+         (win-w (and (null spec)
+                     (vertico-child-frame--target-window-max-width parent)))
+         (win-cap (when win-w
+                    (max cw (- win-w (* 2 margin-x) chrome-w))))
+         (min-px (vertico-child-frame--resolve-bound min-spec pw cw cw))
+         (max-px (vertico-child-frame--resolve-bound
+                  max-spec pw cw max-parent-px))
+         (upper (max cw (min max-px max-parent-px)))
+         (effective-upper (if win-cap (min upper win-cap) upper))
+         (lower (min min-px effective-upper))
+         (floor-px (if min-spec lower (min effective-upper (* 30 cw))))
+         (measured (when (and (null spec) vertico-child-frame-width-resize)
+                     (vertico-child-frame--measure-content-size
+                      effective-upper)))
          (raw-px
           (cond
            ((functionp spec) (round (funcall spec parent)))
            ((and (floatp spec) (<= spec 1.0) (> spec 0.0))
             (round (* pw spec)))
            ((integerp spec) (* (max 1 spec) cw))
+           (measured
+            (let* ((target (max floor-px (+ (car measured) (* 2 cw))))
+                   (clamped (min effective-upper target)))
+              (setq vertico-child-frame--content-measured t)
+              (if (eq vertico-child-frame-width-resize 'grow-only)
+                  (setq vertico-child-frame--max-width-seen
+                        (max vertico-child-frame--max-width-seen clamped))
+                clamped)))
+           ((and vertico-child-frame--content-measured
+                 (eq vertico-child-frame-width-resize 'grow-only)
+                 (> vertico-child-frame--max-width-seen 0))
+            vertico-child-frame--max-width-seen)
            (t
-            (let ((auto-w (round (* pw 0.62)))
-                  (win-w (vertico-child-frame--target-window-max-width parent)))
-              (if win-w
-                  (min auto-w (max cw (- win-w (* 2 margin-x) chrome-w)))
-                auto-w)))))
-         (min-px (vertico-child-frame--resolve-bound min-spec pw cw cw))
-         (max-px (vertico-child-frame--resolve-bound
-                  max-spec pw cw max-parent-px))
-         (upper (max cw (min max-px max-parent-px)))
-         (lower (min min-px upper)))
-    (max lower (min upper raw-px))))
+            (let ((auto-w (round (* pw 0.62))))
+              (if win-cap (min auto-w win-cap) auto-w))))))
+    (max lower (min effective-upper raw-px))))
 
 (defun vertico-child-frame--prompt-width ()
   "Return display width in columns of the minibuffer prompt and input."
@@ -613,8 +671,9 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
       (max 1 total))))
 
 (defun vertico-child-frame--resolve-height
-    (parent lines &optional prompt-lines size-plist)
-  "Compute child-frame height on PARENT for LINES, PROMPT-LINES, and SIZE-PLIST."
+    (parent lines &optional prompt-lines size-plist width-px)
+  "Compute child-frame height on PARENT for LINES using SIZE-PLIST.
+PROMPT-LINES counts wrapped prompt lines; WIDTH-PX bounds measurement."
   (let* ((lh (max 1 (frame-char-height parent)))
          (ph (max lh (frame-pixel-height parent)))
          (chrome-h (cdr (vertico-child-frame--chrome-size)))
@@ -636,14 +695,20 @@ For example, `vertico-buffer-mode' or `vertico-flat-mode'."
             (round (* ph hspec)))
            ((integerp hspec) (* (max 1 hspec) lh))
            (t
-            (* (pcase vertico-child-frame-resize
-                 ('nil (max 1 (+ pl vertico-count)))
-                 ('grow-only
-                  (setq vertico-child-frame--max-height-seen
-                        (max vertico-child-frame--max-height-seen
-                             prompt-plus-lines)))
-                 (_ prompt-plus-lines))
-               lh))))
+            (let ((line-h
+                   (* (pcase vertico-child-frame-resize
+                        ('nil (max 1 (+ pl vertico-count)))
+                        ('grow-only
+                         (setq vertico-child-frame--max-height-seen
+                               (max vertico-child-frame--max-height-seen
+                                    prompt-plus-lines)))
+                        (_ prompt-plus-lines))
+                      lh))
+                  (measured (vertico-child-frame--measure-content-size
+                             (or width-px (frame-pixel-width parent)))))
+              (if measured
+                  (max line-h (cdr measured))
+                line-h)))))
          (min-px (vertico-child-frame--resolve-bound min-spec ph lh lh))
          (max-px (min max-parent-px
                       (vertico-child-frame--resolve-bound
@@ -1066,7 +1131,7 @@ Falls back to PARENT center if point position is unavailable."
          (width (vertico-child-frame--resolve-width parent size-plist))
          (prompt-lines (vertico-child-frame--prompt-lines parent width))
          (height (vertico-child-frame--resolve-height
-                  parent lines prompt-lines size-plist))
+                  parent lines prompt-lines size-plist width))
          (chrome (vertico-child-frame--chrome-size))
          (outer-w (+ width (car chrome)))
          (outer-h (+ height (cdr chrome)))
@@ -1283,6 +1348,8 @@ Falls back to PARENT center if point position is unavailable."
                      (frame-live-p vertico-child-frame--parent))
             (cond
              ((eq frame vertico-child-frame--parent)
+              (setq vertico-child-frame--content-measured nil
+                    vertico-child-frame--max-width-seen 0)
               (set-frame-parameter vertico-child-frame--frame
                                    'vertico-child-frame--geometry nil)
               (vertico-child-frame--resize
@@ -1345,6 +1412,8 @@ child frame immediately."
                 vertico-child-frame--depth depth
                 vertico-child-frame--parent parent
                 vertico-child-frame--max-height-seen 0
+                vertico-child-frame--content-measured nil
+                vertico-child-frame--max-width-seen 0
                 vertico-child-frame--last-lines vertico-count
                 vertico-child-frame--saved-cursor cursor-in-non-selected-windows
                 vertico-child-frame--orig-truncate-lines truncate-lines
@@ -1398,6 +1467,8 @@ child frame immediately."
             vertico-child-frame--window nil
             vertico-child-frame--depth nil
             vertico-child-frame--parent nil
+            vertico-child-frame--content-measured nil
+            vertico-child-frame--max-width-seen 0
             vertico-child-frame--active-buffers
             (delq (current-buffer) vertico-child-frame--active-buffers))
       (remove-hook 'pre-redisplay-functions #'vertico-child-frame--redisplay :local)

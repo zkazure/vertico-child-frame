@@ -12,7 +12,7 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 | Frame reuse | Per-depth frame pool | Single `posframe` buffer/frame | `display-buffer-in-child-frame` |
 | Geometry caching | Skips no-op move/resize calls | Re-evaluates per update | Re-evaluates via `display-buffer` |
 | Positioning | 27 poshandlers (frame, window, other-window, point) + shorthand + offset | `posframe-poshandler-*` | `display-buffer-in-child-frame` |
-| Sizing controls | Width/height (ratio, cols/lines, fn), `size-function` plist, min/max bounds, resize modes | `size-function` + width/height/min-width/min-height | `display-buffer` sizing |
+| Sizing controls | Content-adaptive width (`grow-only` / `t` / `nil`), ratio/cols/fn, `size-function` plist, min/max bounds, height resize modes | `size-function` + width/height/min-width/min-height | `display-buffer` sizing |
 | Recursive minibuffers | Depth-indexed pool + cascade offset + outer re-raise | Overlapping / focus quirks | Window layout interference |
 | Long-path stability | Auto-wrapping (`'auto`), `auto-hscroll-mode 'current-line`, `resize-mini-windows nil` | Known `C-x C-f` jitter & clipping | Inherits buffer window wrapping |
 | Parent resize adaptation | Live resize & re-center via `window-size-change-functions` | Static until next update | Static until next update |
@@ -187,7 +187,8 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `vertico-child-frame-width` | `nil` | `nil` (auto `0.62` of parent, capped to split window), float fraction, column integer, or `(fn parent)` |
+| `vertico-child-frame-width` | `nil` | `nil` (content-adaptive via `width-resize`, falling back to `0.62` of parent), float fraction, column integer, or `(fn parent)` |
+| `vertico-child-frame-width-resize` | `'grow-only` | Content-adaptive width mode when `width` is `nil`: `'grow-only`, `t` (grow & shrink), or `nil` (fixed `0.62`) |
 | `vertico-child-frame-min-width` | `nil` | Minimum width in columns, float fraction, or `nil` |
 | `vertico-child-frame-max-width` | `nil` | Maximum width in columns, float fraction, or `nil` |
 | `vertico-child-frame-height` | `nil` | `nil` (auto via `vertico-count`/`resize`), line integer, float fraction, or `(fn parent lines)` |
