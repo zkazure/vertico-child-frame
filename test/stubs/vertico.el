@@ -5,6 +5,8 @@
 (defvar vertico-count 10)
 (defvar vertico-resize nil)
 (defvar-local vertico--input nil)
+(defvar-local vertico--candidates nil)
+(defvar-local vertico--scroll 0)
 (defvar-local vertico--candidates-ov nil)
 (defvar-local vertico--count-ov nil)
 (defvar vertico-stub--resize-called nil)

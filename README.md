@@ -17,7 +17,7 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 | Long-path stability | Auto-wrapping (`'auto`), `auto-hscroll-mode 'current-line`, `resize-mini-windows nil` | Known `C-x C-f` jitter & clipping | Inherits buffer window wrapping |
 | Parent resize adaptation | Live resize & re-center via `window-size-change-functions` | Static until next update | Static until next update |
 | Marginalia / grid width | Advises `vertico--window-width` to child frame | Needs workarounds / mismatches | Uses buffer window width |
-| Default placement | Top-center command palette (keeps Consult preview clear) | Center of frame (blocks previews) | Buffer-dependent |
+| Default placement | Centered golden-ratio popup (matching `vertico-buffer-frame`, customizable via poshandlers) | Center of frame (blocks previews) | Centered golden-ratio popup |
 | `vertico-multiform` + TTY fallback | Native toggle (`M-C`) + automatic fallback mode | Manual `vertico-multiform` setup | Tied to `vertico-buffer-mode` |
 
 ## Requirements
@@ -70,9 +70,9 @@ Clone this repository and add it to `load-path`:
 
 ## Configuration
 
-### Global mode (Command Palette style)
+### Global mode (`vertico-buffer-frame`-style golden-ratio default)
 
-By default, `vertico-child-frame-mode` opens a top-centered floating child frame (`0.62` of parent width, height from `vertico-count`) so the lower editing area remains unobstructed for `consult` live previews:
+By default, `vertico-child-frame-mode` opens a centered child frame with golden-ratio dimensions scaled by `vertico-child-frame-golden-ratio-scale` (`1.0`, matching `vertico-buffer-frame`), and widens automatically (`vertico-child-frame-width-resize 'grow-only`) when candidates contain wide titles, icons, or `#tags`:
 
 ```elisp
 (vertico-mode 1)
@@ -82,15 +82,16 @@ By default, `vertico-child-frame-mode` opens a top-centered floating child frame
 ### Sizing, position, and appearance example
 
 ```elisp
-(setq vertico-child-frame-poshandler 'frame-center ; or #'vertico-child-frame-poshandler-point-bottom-left-corner
-      vertico-child-frame-width 0.55               ; nil (0.62 auto), fraction (0.0-1.0], integer columns, or fn
-      vertico-child-frame-height 16                ; nil (auto), integer lines, fraction, or fn
-      vertico-child-frame-min-width 50             ; columns, fraction, or nil
-      vertico-child-frame-max-width 110            ; columns, fraction, or nil
-      vertico-child-frame-margin '(16 . 16)        ; optional gap from parent edges
-      vertico-child-frame-internal-border-width 8  ; inner padding in pixels
+(setq vertico-child-frame-poshandler 'frame-center ; default; or 'frame-top-center, 'point-bottom-left-corner, etc.
+      vertico-child-frame-width nil                ; nil (golden-ratio + content adaptive), float fraction, integer cols, or fn
+      vertico-child-frame-height nil               ; nil (uses `vertico-child-frame-resize', default 'golden-ratio), lines, fraction, or fn
+      vertico-child-frame-golden-ratio-scale 1.0   ; 1.0 = inner golden step; >= 1.618 = full fitting golden rectangle
+      vertico-child-frame-min-width nil            ; columns, fraction, or nil
+      vertico-child-frame-max-width nil            ; columns, fraction, or nil
+      vertico-child-frame-margin '(0 . 0)          ; gap from parent edges
+      vertico-child-frame-internal-border-width 0  ; inner padding in pixels
       vertico-child-frame-border-width 1
-      vertico-child-frame-alpha 95)                ; background opacity (0-100) or (ACTIVE . INACTIVE)
+      vertico-child-frame-alpha nil)               ; background opacity (0-100) or (ACTIVE . INACTIVE)
 ```
 
 For `vertico-posframe`-style dynamic sizing, you can also override `vertico-child-frame-size-function` (default `#'vertico-child-frame-get-size`) to return a plist `(:width ... :height ... :min-width ... :max-width ... :min-height ... :max-height ...)`.
@@ -121,7 +122,7 @@ Do **not** enable `(vertico-child-frame-mode 1)` globally if you want `vertico-m
 
 ### `consult` and `embark`
 
-- **Consult live previews**: The default `vertico-child-frame-poshandler-frame-top-center` keeps the middle and lower portions of your frame visible so live buffer/file previews remain readable.
+- **Consult live previews**: Switch `vertico-child-frame-poshandler` to `'frame-top-center` or `'other-window-center` if you want the lower or active window unobscured during live `consult` previews.
 - **Embark recursive actions**: Recursive minibuffers (`enable-recursive-minibuffers t`) each receive their own pooled child frame for their `(minibuffer-depth)`, shifted by `vertico-child-frame-recursive-offset` (default `(24 . 24)` pixels). Exiting the inner prompt hides the nested frame and re-raises the outer session's frame automatically.
 
 ### TTY / small-frame fallback
@@ -140,8 +141,8 @@ Leave `vertico-child-frame-fallback-mode` as `nil` to fall back to the standard 
 
 ### Frame-relative
 
-- `frame-top-center` / `vertico-child-frame-poshandler-frame-top-center` *(default, alias `...-top-center`)* — horizontally centered at `vertico-child-frame-top-offset` (`nil`, matching vertical margin)
-- `frame-center` / `vertico-child-frame-poshandler-frame-center` *(alias `...-center`)* — dead center of the parent frame
+- `frame-center` / `vertico-child-frame-poshandler-frame-center` *(default, alias `...-center`)* — dead center of the parent frame
+- `frame-top-center` / `vertico-child-frame-poshandler-frame-top-center` *(alias `...-top-center`)* — horizontally centered at `vertico-child-frame-top-offset` (`nil`, matching vertical margin)
 - `frame-bottom-center` / `vertico-child-frame-poshandler-frame-bottom-center` *(alias `...-bottom-center`)* — horizontally centered near the bottom at `vertico-child-frame-bottom-offset` (`nil`, matching vertical margin)
 - `frame-top-left-corner` / `vertico-child-frame-poshandler-frame-top-left-corner` — top-left corner inside margins
 - `frame-top-right-corner` / `vertico-child-frame-poshandler-frame-top-right-corner` — top-right corner inside margins
@@ -187,16 +188,17 @@ All coordinates apply `vertico-child-frame-offset` plus recursive cascade offset
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `vertico-child-frame-width` | `nil` | `nil` (content-adaptive via `width-resize`, falling back to `0.62` of parent), float fraction, column integer, or `(fn parent)` |
-| `vertico-child-frame-width-resize` | `'grow-only` | Content-adaptive width mode when `width` is `nil`: `'grow-only`, `t` (grow & shrink), or `nil` (fixed `0.62`) |
+| `vertico-child-frame-width` | `nil` | `nil` (golden-ratio + content-adaptive via `width-resize`), float fraction, column integer, or `(fn parent)` |
+| `vertico-child-frame-width-resize` | `'grow-only` | Content-adaptive width mode when `width` is `nil`: `'grow-only` (golden-ratio floor), `t` (grow & shrink), or `nil` (fixed golden-ratio) |
+| `vertico-child-frame-golden-ratio-scale` | `1.0` | Scale factor for golden-ratio child-frame dimensions (`1.0` = inner golden step; `>= 1.618` = full golden rectangle) |
 | `vertico-child-frame-min-width` | `nil` | Minimum width in columns, float fraction, or `nil` |
 | `vertico-child-frame-max-width` | `nil` | Maximum width in columns, float fraction, or `nil` |
-| `vertico-child-frame-height` | `nil` | `nil` (auto via `vertico-count`/`resize`), line integer, float fraction, or `(fn parent lines)` |
-| `vertico-child-frame-resize` | `nil` | `nil` (fixed), `t` (grow & shrink), or `grow-only` (when `height` is `nil`) |
+| `vertico-child-frame-height` | `nil` | `nil` (auto via `resize`), line integer, float fraction, or `(fn parent lines)` |
+| `vertico-child-frame-resize` | `'golden-ratio` | `'golden-ratio` (fits `vertico-count` to golden rectangle), `nil` (fixed `vertico-count`), `t` (grow & shrink), or `grow-only` |
 | `vertico-child-frame-min-height` | `nil` | Minimum height in lines, float fraction, or `nil` (1 line) |
 | `vertico-child-frame-max-height` | `nil` | Maximum height as float fraction of parent height, line integer, or `nil` |
 | `vertico-child-frame-size-function` | `#'vertico-child-frame-get-size` | Function returning sizing plist (`:width :height :min-width :max-width :min-height :max-height`) |
-| `vertico-child-frame-poshandler` | `#'vertico-child-frame-poshandler-frame-top-center` | Position handler function or short symbol |
+| `vertico-child-frame-poshandler` | `#'vertico-child-frame-poshandler-frame-center` | Position handler function or short symbol |
 | `vertico-child-frame-offset` | `'(0 . 0)` | Additional pixel offset `(DX . DY)` added after poshandler |
 | `vertico-child-frame-top-offset` | `nil` | Top offset (`nil` uses vertical `margin`, or fraction / pixels) |
 | `vertico-child-frame-bottom-offset` | `nil` | Bottom offset (`nil` uses vertical `margin` + mode-line/minibuffer clearance) |

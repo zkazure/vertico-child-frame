@@ -26,7 +26,7 @@
           (next-id 1)
           (vcf-test--point-xy '(150 . 100))
           (vcf-test--point-lh 20)
-          (vcf-test--content-pixel-size nil)
+          (vcf-test--string-pixel-width-fn nil)
           (parent-win (make-vcf-test-win
                        :buffer (current-buffer)
                        :point 1
@@ -91,7 +91,7 @@
           (orig-window-width (symbol-function 'window-width))
           (orig-window-pixel-height (symbol-function 'window-pixel-height))
           (orig-window-mode-line-height (symbol-function 'window-mode-line-height))
-          (orig-window-text-pixel-size (symbol-function 'window-text-pixel-size))
+          (orig-string-pixel-width (symbol-function 'string-pixel-width))
           (orig-window-pixel-edges (symbol-function 'window-pixel-edges))
           (orig-window-inside-pixel-edges (symbol-function 'window-inside-pixel-edges))
           (orig-window-point (symbol-function 'window-point))
@@ -182,17 +182,21 @@
              (cl-incf make-frame-calls)
              (let* ((cw 10)
                     (ch 20)
-                    (w (make-vcf-test-win :width 72 :height 11 :pixel-h 220))
+                    (cols (max 1 (or (alist-get 'width params) 72)))
+                    (rows (max 1 (or (alist-get 'height params) 11)))
+                    (pw (* cols cw))
+                    (ph (* rows ch))
+                    (w (make-vcf-test-win :width cols :height rows :pixel-h ph))
                     (f (make-vcf-test-frame
                         :id next-id
                         :parent (alist-get 'parent-frame params)
                         :root-window w
-                        :pixel-w 720
-                        :pixel-h 220
+                        :pixel-w pw
+                        :pixel-h ph
                         :char-w cw
                         :char-h ch
-                        :cols 72
-                        :rows 11
+                        :cols cols
+                        :rows rows
                         :visible (alist-get 'visibility params)
                         :live t
                         :params (copy-alist params))))
@@ -326,15 +330,11 @@
              (if (vcf-test-win-p w)
                  (or (vcf-test-win-mode-line-h w) 0)
                (funcall orig-window-mode-line-height w))))
-          ((symbol-function 'window-text-pixel-size)
-           (lambda (&optional w from to x-limit y-limit mode-lines ignore-end)
-             (if (vcf-test-win-p w)
-                 (when vcf-test--content-pixel-size
-                   (let ((cw (car vcf-test--content-pixel-size))
-                         (ch (cdr vcf-test--content-pixel-size)))
-                     (cons (if (numberp x-limit) (min cw x-limit) cw) ch)))
-               (funcall orig-window-text-pixel-size
-                        w from to x-limit y-limit mode-lines ignore-end))))
+          ((symbol-function 'string-pixel-width)
+           (lambda (str &rest _args)
+             (if (and vcf-test--active vcf-test--string-pixel-width-fn)
+                 (funcall vcf-test--string-pixel-width-fn str)
+               (funcall orig-string-pixel-width str))))
           ((symbol-function 'window-pixel-edges)
            (lambda (&optional w)
              (if (vcf-test-win-p w)
@@ -596,6 +596,7 @@
               (setf (vcf-test-win-buffer mb-win) (current-buffer))
               (let ((vertico-child-frame-poshandler 'frame-top-center)
                     (vertico-child-frame-width 0.6)
+                    (vertico-child-frame-resize nil)
                     (vertico-child-frame-bottom-respect-mode-line nil))
                 (vertico--setup)
                 (vertico-child-frame-set-poshandler
@@ -1022,33 +1023,35 @@
 
 (ert-deftest vcf-test-posframe-parity-and-size-function ()
   (vcf-test-with-mock-gui
-    ;; With posframe-style defaults (margin '(0 . 0), width nil -> 0.62,
-    ;; bottom-respect-mode-line t), top/bottom corners align flush / clear bars.
+    ;; With posframe-style overrides (margin '(0 . 0), resize nil -> 10 lines,
+    ;; width nil -> golden-ratio 742px, bottom-respect-mode-line t),
+    ;; top/bottom corners align flush / clear mode-line & minibuffer.
     (setf (vcf-test-win-mode-line-h parent-win) 22)
-    (let ((vertico-count 10))
-      ;; Frame top-center flush at y=0, width = round(1200 * 0.62) = 744
+    (let ((vertico-count 10)
+          (vertico-child-frame-resize nil))
+      ;; Frame top-center flush at y=0, width = 742 -> x = 220
       (let ((vertico-child-frame-poshandler 'frame-top-center))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
-                       '(219 0 744 220))))
+                       '(220 0 742 220))))
       ;; Frame top-left-corner flush at (0 . 0)
       (let ((vertico-child-frame-poshandler 'frame-top-left-corner))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
-                       '(0 0 744 220))))
+                       '(0 0 742 220))))
       ;; Frame bottom-center clears minibuffer (20) + mode-line (22) = 42px
       ;; outer-h = 222 -> y = 800 - 222 - 42 = 536
       (let ((vertico-child-frame-poshandler 'frame-bottom-center))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
-                       '(219 536 744 220))))
+                       '(220 536 742 220))))
       ;; Frame bottom-right-corner clears mode-line + minibuffer and sits flush right
       (let ((vertico-child-frame-poshandler 'frame-bottom-right-corner))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
-                       '(438 536 744 220))))
+                       '(440 536 742 220))))
       ;; Window bottom-center clears that window's mode-line (22px)
       (setf (vcf-test-win-edges parent-win) '(100 50 900 650))
       (let ((vertico-child-frame-poshandler 'window-bottom-center))
         (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
-                       '(119 406 744 220))))
-      ;; Narrow other-window caps auto-width (0.62) so it fits inside that split
+                       '(120 406 742 220))))
+      ;; Narrow other-window caps auto-width so it fits inside that split
       (let ((other-win (make-vcf-test-win
                         :frame parent-frame
                         :width 50
@@ -1078,18 +1081,22 @@
                        '(291 319 600 160)))))))
 
 (ert-deftest vcf-test-content-adaptive-width ()
-  "Test content-adaptive width/height via `window-text-pixel-size'."
+  "Test `vertico-buffer-frame' golden-ratio defaults and `string-pixel-width' auto-width."
   (vcf-test-with-mock-gui
+    ;; Verify vertico-buffer-frame parity defaults
+    (should (eq (default-value 'vertico-child-frame-poshandler)
+                #'vertico-child-frame-poshandler-frame-center))
+    (should (eq (default-value 'vertico-child-frame-resize) 'golden-ratio))
+    (should (= (default-value 'vertico-child-frame-golden-ratio-scale) 1.0))
     (let* ((vertico-child-frame-width nil)
            (vertico-child-frame-min-width nil)
            (vertico-child-frame-max-width nil)
            (vertico-child-frame-height nil)
-           (vertico-child-frame-resize nil)
+           (vertico-child-frame-resize 'golden-ratio)
            (vertico-child-frame-width-resize 'grow-only)
+           (vertico-child-frame-golden-ratio-scale 1.0)
            (vertico-child-frame-margin '(0 . 0))
-           (vertico-child-frame-poshandler 'frame-top-center)
-           (vertico-child-frame-top-offset nil)
-           (vertico-child-frame-bottom-offset nil)
+           (vertico-child-frame-poshandler #'vertico-child-frame-poshandler-frame-center)
            (vertico-child-frame-border-width 1)
            (vertico-child-frame-left-fringe 8)
            (vertico-child-frame-right-fringe 8)
@@ -1098,116 +1105,192 @@
            (vertico-child-frame-offset '(0 . 0))
            (vertico-child-frame-truncate-lines 'auto)
            (vertico-count 10)
-           (vertico--candidates-ov (make-overlay 1 1))
-           (child-win (make-vcf-test-win :width 80 :height 11 :pixel-h 220))
-           (child-frame (make-vcf-test-frame
-                         :parent parent-frame
-                         :root-window child-win
-                         :cols 80
-                         :rows 11
-                         :pixel-w 800
-                         :pixel-h 220
-                         :char-w 10
-                         :char-h 20
-                         :live t))
-           (buf (generate-new-buffer " *vcf-adaptive-test*")))
-      (setf (vcf-test-win-frame child-win) child-frame)
-      (unwind-protect
-          (with-current-buffer buf
-            (insert "1/2053 Node: ")
-            (setq vertico-child-frame--active t
-                  vertico-child-frame--frame child-frame
-                  vertico-child-frame--window child-win
-                  vertico-child-frame--parent parent-frame
-                  vertico-child-frame--depth 1
-                  vertico-child-frame--max-height-seen 0
-                  vertico-child-frame--content-measured nil
-                  vertico-child-frame--max-width-seen 0)
-            (push buf vertico-child-frame--active-buffers)
-            (setf (vcf-test-win-buffer child-win) buf)
-            ;; Without candidate overlay text, falls back to 0.62 * parent (950 -> 589)
-            (setf (vcf-test-frame-pixel-w parent-frame) 950
-                  (vcf-test-frame-cols parent-frame) 95
-                  (vcf-test-frame-pixel-h parent-frame) 800
-                  (vcf-test-frame-rows parent-frame) 40
-                  (vcf-test-win-edges parent-win) '(0 0 950 800))
-            (setq vcf-test--content-pixel-size '(850 . 220))
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       589))
-            ;; Once candidates render, medium 950px frame expands beyond 0.62 to 850 + 20 = 870
-            (overlay-put vertico--candidates-ov 'before-string "0 main title #tag")
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       870))
-            ;; Fullscreen 1920px frame shrinks from 1190 (0.62) to 870 on first measurement
-            (setq vertico-child-frame--content-measured nil
-                  vertico-child-frame--max-width-seen 0)
-            (setf (vcf-test-frame-pixel-w parent-frame) 1920
-                  (vcf-test-frame-cols parent-frame) 192
-                  (vcf-test-win-edges parent-win) '(0 0 1920 1080))
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       870))
-            ;; Filtering to narrower candidates (450px) stays at 870 under `grow-only'
-            (setq vcf-test--content-pixel-size '(450 . 220))
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       870))
-            ;; Under `t' mode, shrinks to 450 + 20 = 470 and respects 30-col (300px) floor
-            (let ((vertico-child-frame-width-resize t))
+           (orig-make-frame (symbol-function 'make-frame))
+           (created-frames nil))
+      ;; Golden-ratio geometry on 1200x800 and 1920x1080
+      (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                     '(220 170 742 458)))
+      (let ((wide-parent (make-vcf-test-frame
+                          :id 50
+                          :pixel-w 1920
+                          :pixel-h 1080
+                          :char-w 10
+                          :char-h 20
+                          :cols 192
+                          :rows 54
+                          :visible t
+                          :live t
+                          :root-window parent-win)))
+        (should (equal (vertico-child-frame--compute-geometry wide-parent 10 1)
+                       '(411 206 1080 667))))
+      (let ((vertico-child-frame-golden-ratio-scale 1.7))
+        (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                       '(0 28 1182 742))))
+      ;; Full session setup: non-zero initial frame, synced vertico-count,
+      ;; empty candidates do not collapse to a tiny square, teardown restores state.
+      (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                ((symbol-function 'minibuffer-depth) (lambda () 1))
+                ((symbol-function 'make-frame)
+                 (lambda (&optional params)
+                   (let ((f (funcall orig-make-frame params)))
+                     (push f created-frames)
+                     f))))
+        (vertico-child-frame-mode 1)
+        (unwind-protect
+            (with-temp-buffer
+              (insert "Node: ")
+              (setf (vcf-test-win-buffer mb-win) (current-buffer))
+              (vertico--setup)
+              (let ((f vertico-child-frame--frame)
+                    (w vertico-child-frame--window))
+                (should (= (length created-frames) 1))
+                ;; Initial frame created with non-zero golden-ratio cols/rows
+                (should (>= (alist-get 'width (vcf-test-frame-params f)) 20))
+                (should (>= (alist-get 'height (vcf-test-frame-params f)) 10))
+                ;; vertico-count auto-fitted to golden-ratio height (458/20 - 2 = 20)
+                (should (= vertico-count 20))
+                ;; Simulate empty candidate state during early redisplay
+                (overlay-put vertico--candidates-ov 'before-string #(" " 0 1 (cursor t)))
+                (overlay-put vertico--count-ov 'before-string "0/0 ")
+                (setq vertico--candidates nil)
+                (vertico-child-frame--redisplay w)
+                (should (= (frame-pixel-width f) 742))
+                (should (= (frame-pixel-height f) 458))
+                (should (equal (frame-position f) '(220 . 170))))
+              (run-hooks 'minibuffer-exit-hook)
+              ;; Teardown restores vertico-count and clears overlay strings
+              (should (= vertico-count 10))
+              (should-not (overlay-get vertico--candidates-ov 'before-string))
+              (should-not (overlay-get vertico--count-ov 'before-string)))
+          (vertico-child-frame-mode -1)))
+      ;; Content-adaptive width via safe `string-pixel-width'
+      (setq vcf-test--string-pixel-width-fn
+            (lambda (str)
+              (* 10 (apply #'max 0 (mapcar #'string-width
+                                           (split-string str "\n"))))))
+      (let* ((vertico--candidates-ov (make-overlay 1 1))
+             (vertico--candidates nil)
+             (vertico--scroll 0)
+             (child-win (make-vcf-test-win :width 59 :height 22 :pixel-h 440))
+             (child-frame (make-vcf-test-frame
+                           :id 60
+                           :parent parent-frame
+                           :root-window child-win
+                           :cols 59
+                           :rows 22
+                           :pixel-w 590
+                           :pixel-h 440
+                           :char-w 10
+                           :char-h 20
+                           :live t))
+             (buf (generate-new-buffer " *vcf-adaptive-test*")))
+        (setf (vcf-test-win-frame child-win) child-frame)
+        (unwind-protect
+            (with-current-buffer buf
+              (insert "1/2053 Node: ")
+              (setq vertico-child-frame--active t
+                    vertico-child-frame--frame child-frame
+                    vertico-child-frame--window child-win
+                    vertico-child-frame--parent parent-frame
+                    vertico-child-frame--depth 1
+                    vertico-child-frame--max-height-seen 0
+                    vertico-child-frame--max-width-seen 0)
+              (push buf vertico-child-frame--active-buffers)
+              (setf (vcf-test-win-buffer child-win) buf)
+              ;; 950x800 frame -> golden-w = 587
+              (setf (vcf-test-frame-pixel-w parent-frame) 950
+                    (vcf-test-frame-cols parent-frame) 95
+                    (vcf-test-frame-pixel-h parent-frame) 800
+                    (vcf-test-frame-rows parent-frame) 40
+                    (vcf-test-win-edges parent-win) '(0 0 950 800))
+              ;; Empty overlay (" ") stays at golden-w = 587
+              (overlay-put vertico--candidates-ov 'before-string " ")
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         470))
-              (setq vcf-test--content-pixel-size '(120 . 220))
+                         587))
+              ;; Wide candidate (80 chars = 800px) in `vertico--candidates' even when
+              ;; `before-string' is clipped (58 chars = 580px) grows up to 90% max (838px)
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 58 ?a)))
+              (setq vertico--candidates (list (make-string 80 ?a)))
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         300)))
-            ;; `vertico-child-frame-width-resize' nil disables content measurement -> 1190
-            (let ((vertico-child-frame-width-resize nil))
-              (setq vcf-test--content-pixel-size '(850 . 220))
+                         838))
+              ;; Test fresh session with 70-char candidate (700 + 60 = 760 < 838)
+              (setq vertico-child-frame--max-width-seen 0)
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 50 ?b)))
+              (setq vertico--candidates (list (make-string 70 ?b)))
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         1190)))
-            ;; Explicit width (55 cols = 550px) overrides content measurement
-            (let ((vertico-child-frame-width 55))
-              (setq vcf-test--content-pixel-size '(850 . 220))
+                         760))
+              ;; Narrower candidates (40 chars = 400px) keep 760 under `grow-only'
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 40 ?c)))
+              (setq vertico--candidates (list (make-string 40 ?c)))
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         550)))
-            ;; `other-window-*' caps wide content (850) to split window width (500 - 18 = 482)
-            (let ((other-win (make-vcf-test-win
-                              :frame parent-frame
-                              :width 50
-                              :height 30
-                              :pixel-h 600
-                              :mode-line-h 24
-                              :edges '(1420 0 1920 1000)))
-                  (vertico-child-frame-poshandler 'other-window-center)
-                  (vertico-child-frame-width-resize t))
-              (setf (vcf-test-win-edges parent-win) '(0 0 1420 1000))
-              (setq mock-window-list (list parent-win other-win))
-              (setq vcf-test--content-pixel-size '(850 . 220))
+                         760))
+              ;; Under `t' mode, shrinks to 400 + 60 = 460 and respects 30-col (300px) floor
+              (let ((vertico-child-frame-width-resize t))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           460))
+                (overlay-put vertico--candidates-ov 'before-string
+                             (concat " \n" (make-string 10 ?d)))
+                (setq vertico--candidates (list (make-string 10 ?d)))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           300)))
+              ;; `vertico-child-frame-width-resize' nil stays at golden-w = 587
+              (let ((vertico-child-frame-width-resize nil))
+                (setq vertico--candidates (list (make-string 70 ?e)))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           587)))
+              ;; Explicit width (55 cols = 550px) overrides content measurement
+              (let ((vertico-child-frame-width 55))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           550)))
+              ;; `other-window-*' caps wide content (800px) to split window width (482px)
+              (let ((other-win (make-vcf-test-win
+                                :frame parent-frame
+                                :width 50
+                                :height 30
+                                :pixel-h 600
+                                :mode-line-h 24
+                                :edges '(1420 0 1920 1000)))
+                    (vertico-child-frame-poshandler 'other-window-center)
+                    (vertico-child-frame-width-resize t))
+                (setf (vcf-test-frame-pixel-w parent-frame) 1920
+                      (vcf-test-frame-cols parent-frame) 192
+                      (vcf-test-win-edges parent-win) '(0 0 1420 1000))
+                (setq mock-window-list (list parent-win other-win))
+                (overlay-put vertico--candidates-ov 'before-string
+                             (concat " \n" (make-string 80 ?f)))
+                (setq vertico--candidates (list (make-string 80 ?f)))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           482))
+                (overlay-put vertico--candidates-ov 'before-string
+                             (concat " \n" (make-string 30 ?g)))
+                (setq vertico--candidates (list (make-string 30 ?g)))
+                (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
+                           360)))
+              ;; Parent resize resets `--max-width-seen' so widening expands child frame
+              (setq mock-window-list (list parent-win)
+                    vertico-child-frame--max-width-seen 0)
+              (overlay-put vertico--candidates-ov 'before-string
+                           (concat " \n" (make-string 70 ?h)))
+              (setq vertico--candidates (list (make-string 70 ?h)))
+              (setf (vcf-test-frame-pixel-w parent-frame) 800
+                    (vcf-test-frame-cols parent-frame) 80
+                    (vcf-test-win-edges parent-win) '(0 0 800 800))
+              ;; floor(782 * 0.9) = 703
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         482))
-              (setq vcf-test--content-pixel-size '(350 . 220))
+                         703))
+              (setf (vcf-test-frame-pixel-w parent-frame) 1200
+                    (vcf-test-frame-cols parent-frame) 120
+                    (vcf-test-win-edges parent-win) '(0 0 1200 800))
+              (vertico-child-frame--on-window-size-change parent-frame)
               (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                         370)))
-            ;; Parent frame resize resets content measurement so widening expands child frame,
-            ;; and taller CJK/icon content height (250px > 11*20) prevents bottom clipping
-            (setq mock-window-list (list parent-win)
-                  vertico-child-frame--content-measured nil
-                  vertico-child-frame--max-width-seen 0
-                  vcf-test--content-pixel-size '(850 . 250))
-            (setf (vcf-test-frame-pixel-w parent-frame) 800
-                  (vcf-test-frame-cols parent-frame) 80
-                  (vcf-test-win-edges parent-win) '(0 0 800 800))
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       782))
-            (should (= (nth 3 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       250))
-            (setf (vcf-test-frame-pixel-w parent-frame) 1200
-                  (vcf-test-frame-cols parent-frame) 120
-                  (vcf-test-win-edges parent-win) '(0 0 1200 800))
-            (vertico-child-frame--on-window-size-change parent-frame)
-            (should (= (nth 2 (vertico-child-frame--compute-geometry parent-frame 10 1))
-                       870)))
-        (setq vertico-child-frame--active-buffers
-              (delq buf vertico-child-frame--active-buffers))
-        (delete-overlay vertico--candidates-ov)
-        (when (buffer-live-p buf) (kill-buffer buf))))))
+                         760)))
+          (setq vertico-child-frame--active-buffers
+                (delq buf vertico-child-frame--active-buffers))
+          (delete-overlay vertico--candidates-ov)
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here
