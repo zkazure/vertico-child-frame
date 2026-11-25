@@ -767,6 +767,21 @@
                 (should-not fallback-state)))
           (vertico-child-frame-mode -1))))))
 
+(defvar vcf-test--cl-fb-mode nil
+  "Mock fallback minor-mode variable used in `cl-defmethod' dispatch test.")
+(defvar vcf-test--cl-fb-activate-count 0)
+(defvar vcf-test--cl-fb-setup-count 0)
+
+(defun vcf-test--cl-fb-mode (&optional arg)
+  "Toggle mock fallback mode `vcf-test--cl-fb-mode' according to ARG."
+  (let ((enable (if (numberp arg) (> arg 0) (not vcf-test--cl-fb-mode))))
+    (when enable
+      (cl-incf vcf-test--cl-fb-activate-count))
+    (setq vcf-test--cl-fb-mode enable)))
+
+(cl-defmethod vertico--setup :after (&context (vcf-test--cl-fb-mode (eql t)))
+  (cl-incf vcf-test--cl-fb-setup-count))
+
 (ert-deftest vcf-test-tty-child-frames-support-and-geometry ()
   "Verify Emacs 31+ `tty-child-frames' detection, cell geometry, and lifecycle."
   (vcf-test-with-mock-gui
@@ -893,6 +908,83 @@
             (when (buffer-live-p buf1) (kill-buffer buf1))
             (when (buffer-live-p buf2) (kill-buffer buf2))
             (vertico-child-frame-mode -1)))))))
+
+(ert-deftest vcf-test-fallback-dispatches-vertico-setup ()
+  "Verify fallback mode activates before `vertico--setup' method dispatch."
+  (should-not (vertico-child-frame--supported-p))
+  (let ((vertico-child-frame-fallback-mode #'vcf-test--cl-fb-mode)
+        (vcf-test--cl-fb-mode nil)
+        (vcf-test--cl-fb-activate-count 0)
+        (vcf-test--cl-fb-setup-count 0))
+    ;; 1. Global mode: fallback activates once before cl-defmethod :after runs
+    (vertico-child-frame-mode 1)
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                    ((symbol-function 'active-minibuffer-window)
+                     (lambda () (selected-window)))
+                    ((symbol-function 'minibuffer-depth) (lambda () 1)))
+            (vertico--setup)
+            (should-not vertico-child-frame--active)
+            (should vcf-test--cl-fb-mode)
+            (should (= vcf-test--cl-fb-activate-count 1))
+            (should (= vcf-test--cl-fb-setup-count 1))
+            (run-hooks 'minibuffer-exit-hook)
+            (should-not vcf-test--cl-fb-mode)))
+      (vertico-child-frame-mode -1))
+    ;; 2. Multiform-style :around advice enabling vertico-child-frame-mode dynamically
+    (setq vcf-test--cl-fb-activate-count 0
+          vcf-test--cl-fb-setup-count 0)
+    (let ((multiform-around
+           (lambda (orig &rest args)
+             (vertico-child-frame-mode 1)
+             (add-hook 'minibuffer-exit-hook
+                       (lambda () (vertico-child-frame-mode -1))
+                       nil :local)
+             (apply orig args))))
+      (advice-add #'vertico--setup :around multiform-around)
+      (unwind-protect
+          (with-temp-buffer
+            (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                      ((symbol-function 'active-minibuffer-window)
+                       (lambda () (selected-window)))
+                      ((symbol-function 'minibuffer-depth) (lambda () 1)))
+              (vertico--setup)
+              (should vcf-test--cl-fb-mode)
+              (should (= vcf-test--cl-fb-activate-count 1))
+              (should (= vcf-test--cl-fb-setup-count 1))
+              (run-hooks 'minibuffer-exit-hook)
+              (should-not vcf-test--cl-fb-mode)))
+        (advice-remove #'vertico--setup multiform-around)
+        (vertico-child-frame-mode -1)))
+    ;; 3. Recursive minibuffer preserves outer fallback ownership until depth 1 exits
+    (setq vcf-test--cl-fb-activate-count 0
+          vcf-test--cl-fb-setup-count 0)
+    (vertico-child-frame-mode 1)
+    (unwind-protect
+        (let ((buf1 (generate-new-buffer " *fb-mb1*"))
+              (buf2 (generate-new-buffer " *fb-mb2*")))
+          (unwind-protect
+              (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                        ((symbol-function 'active-minibuffer-window)
+                         (lambda () (selected-window))))
+                (with-current-buffer buf1
+                  (vertico--setup)
+                  (should vcf-test--cl-fb-mode)
+                  (should (eq vertico-child-frame--fallback-active
+                              #'vcf-test--cl-fb-mode))
+                  (with-current-buffer buf2
+                    (vertico--setup)
+                    (should vcf-test--cl-fb-mode)
+                    (should-not vertico-child-frame--fallback-active)
+                    (run-hooks 'minibuffer-exit-hook)
+                    (should vcf-test--cl-fb-mode))
+                  (should vcf-test--cl-fb-mode)
+                  (run-hooks 'minibuffer-exit-hook)
+                  (should-not vcf-test--cl-fb-mode)))
+            (when (buffer-live-p buf1) (kill-buffer buf1))
+            (when (buffer-live-p buf2) (kill-buffer buf2))))
+      (vertico-child-frame-mode -1))))
 
 ;;;; Lifecycle, pooling, recursive minibuffers, and multiform tests
 

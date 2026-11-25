@@ -536,6 +536,8 @@ This avoids first-popup `make-frame' and face-realization latency."
 
 (defun vertico-child-frame--deactivate-fallback ()
   "Disable the temporary fallback mode activated for this session."
+  (remove-hook 'minibuffer-exit-hook
+               #'vertico-child-frame--deactivate-fallback :local)
   (when (and vertico-child-frame--fallback-active
              (fboundp vertico-child-frame--fallback-active))
     (let ((mode vertico-child-frame--fallback-active))
@@ -546,11 +548,22 @@ This avoids first-popup `make-frame' and face-realization latency."
   "Activate `vertico-child-frame-fallback-mode' for this session if configured."
   (when-let* ((mode vertico-child-frame-fallback-mode)
               ((fboundp mode))
+              ((not vertico-child-frame--fallback-active))
               ((not (and (boundp mode) (symbol-value mode)))))
     (setq vertico-child-frame--fallback-active mode)
     (funcall mode 1)
     (add-hook 'minibuffer-exit-hook
               #'vertico-child-frame--deactivate-fallback nil :local)))
+
+(defun vertico-child-frame--before-setup (&rest _args)
+  "Activate fallback display mode before `vertico--setup' dispatches."
+  (when (and (bound-and-true-p vertico-child-frame-mode)
+             (minibufferp))
+    (let* ((mbwin (or (active-minibuffer-window) (selected-window)))
+           (parent (and (window-live-p mbwin) (window-frame mbwin))))
+      (unless (vertico-child-frame--can-display-p parent)
+        (setq vertico-child-frame--active nil)
+        (vertico-child-frame--activate-fallback)))))
 
 ;;;; Geometry and poshandlers
 
@@ -1901,6 +1914,9 @@ child frame immediately."
             (setq vertico-child-frame--active-frames nil
                   vertico-child-frame--active-buffers nil))
         (vertico-child-frame-cleanup)))))
+
+(advice-add #'vertico--setup :before #'vertico-child-frame--before-setup
+            '((depth . 90)))
 
 (cl-defmethod vertico--setup :after (&context (vertico-child-frame-mode (eql t)))
   "Set up the child frame when VERTICO-CHILD-FRAME-MODE is active."
