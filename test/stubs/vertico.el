@@ -11,6 +11,7 @@
 (defvar-local vertico--count-ov nil)
 (defvar vertico-stub--resize-called nil)
 (defvar vertico-stub--exhibit-called nil)
+(defvar vertico-stub--update-called nil)
 
 (cl-defgeneric vertico--setup ()
   "Setup completion UI."
@@ -29,6 +30,10 @@
 (defun vertico--window-width ()
   "Return window width."
   (window-width))
+
+(defun vertico--update (&optional interruptible)
+  "Update completion state, optionally INTERRUPTIBLE."
+  (setq vertico-stub--update-called (if interruptible 'interruptible 'sync)))
 
 (defun vertico--exhibit ()
   "Exhibit candidates."

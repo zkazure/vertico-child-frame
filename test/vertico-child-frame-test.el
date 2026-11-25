@@ -1680,5 +1680,72 @@
       (vertico-child-frame-mode -1)
       (should-not vertico-child-frame--pool))))
 
+(ert-deftest vcf-test-initial-exhibit-recovery ()
+  "Verify initial exhibit recovery runs only when `vertico--input' stays `t'."
+  (vcf-test-with-mock-gui
+    (vertico-child-frame-mode 1)
+    (unwind-protect
+        (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                  ((symbol-function 'minibuffer-depth) (lambda () 1)))
+          ;; 1. When `vertico--input' is still `t' (aborted initial exhibit),
+          ;; recovery calls `vertico--update' non-interruptibly and `vertico--exhibit'.
+          (with-temp-buffer
+            (let ((buf (current-buffer))
+                  (timer nil))
+              (unwind-protect
+                  (progn
+                    (setf (vcf-test-win-buffer mb-win) buf)
+                    (vertico--setup)
+                    (setq timer vertico-child-frame--init-timer)
+                    (should (timerp timer))
+                    (should (memq timer timer-idle-list))
+                    (setq vertico-stub--update-called nil
+                          vertico-stub--exhibit-called nil)
+                    (vertico-child-frame--ensure-initial-exhibit buf)
+                    (should (eq vertico-stub--update-called 'sync))
+                    (should vertico-stub--exhibit-called)
+                    (should-not vertico-child-frame--init-timer)
+                    ;; 2. When `vertico--input' is already computed as a cons cell,
+                    ;; recovery is a no-op.
+                    (setq vertico--input '("foo" . 3)
+                          vertico-stub--update-called nil
+                          vertico-stub--exhibit-called nil)
+                    (vertico-child-frame--ensure-initial-exhibit buf)
+                    (should-not vertico-stub--update-called)
+                    (should-not vertico-stub--exhibit-called)
+                    (should-not vertico-child-frame--init-timer))
+                (when (timerp timer)
+                  (cancel-timer timer))
+                (run-hooks 'minibuffer-exit-hook))))
+          ;; 3. Teardown cancels the scheduled idle timer and clears it;
+          ;; running recovery afterward or on a killed buffer is a no-op.
+          (let ((dead-buf (generate-new-buffer " *vcf-init-dead*"))
+                (timer nil))
+            (unwind-protect
+                (with-current-buffer dead-buf
+                  (setf (vcf-test-win-buffer mb-win) dead-buf)
+                  (vertico--setup)
+                  (setq timer vertico-child-frame--init-timer)
+                  (should (timerp timer))
+                  (should (memq timer timer-idle-list))
+                  (run-hooks 'minibuffer-exit-hook)
+                  (should-not vertico-child-frame--init-timer)
+                  (should-not (memq timer timer-idle-list))
+                  (setq vertico-stub--update-called nil
+                        vertico-stub--exhibit-called nil)
+                  (vertico-child-frame--ensure-initial-exhibit dead-buf)
+                  (should-not vertico-stub--update-called)
+                  (should-not vertico-stub--exhibit-called))
+              (when (timerp timer)
+                (cancel-timer timer))
+              (when (buffer-live-p dead-buf)
+                (kill-buffer dead-buf)))
+            (setq vertico-stub--update-called nil
+                  vertico-stub--exhibit-called nil)
+            (vertico-child-frame--ensure-initial-exhibit dead-buf)
+            (should-not vertico-stub--update-called)
+            (should-not vertico-stub--exhibit-called)))
+      (vertico-child-frame-mode -1))))
+
 (provide 'vertico-child-frame-test)
 ;;; vertico-child-frame-test.el ends here
