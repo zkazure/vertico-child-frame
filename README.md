@@ -22,7 +22,7 @@ Existing child-frame extensions for Vertico (`vertico-posframe` and `vertico-buf
 
 ## Requirements
 
-- **GNU Emacs** 29.1 or newer (tested on Emacs 30.2, Linux X11 / Wayland `pgtk`)
+- **GNU Emacs** 29.1 or newer (tested on Emacs 30.2, Linux X11 / Wayland `pgtk`; native TTY child frames require **GNU Emacs 31+** with `tty-child-frames`)
 - **Vertico** 1.0 or newer
 
 ## Installation
@@ -125,9 +125,10 @@ Do **not** enable `(vertico-child-frame-mode 1)` globally if you want `vertico-m
 - **Consult live previews**: Switch `vertico-child-frame-poshandler` to `'frame-top-center` or `'other-window-center` if you want the lower or active window unobscured during live `consult` previews.
 - **Embark recursive actions**: Recursive minibuffers (`enable-recursive-minibuffers t`) each receive their own pooled child frame for their `(minibuffer-depth)`, shifted by `vertico-child-frame-recursive-offset` (default `(24 . 24)` pixels). Exiting the inner prompt hides the nested frame and re-raises the outer session's frame automatically.
 
-### TTY / small-frame fallback
+### TTY / small-frame support and fallback
 
-When running in a terminal (`emacs -nw`) without child-frame support or when the parent frame is smaller than `vertico-child-frame-min-parent-width` / `vertico-child-frame-min-parent-height`, `vertico-child-frame` automatically steps aside and optionally enables `vertico-child-frame-fallback-mode` for the duration of that session:
+- **Emacs 31+ (`tty-child-frames`)**: Native terminal child frames are detected automatically via `(featurep 'tty-child-frames)` on live TTY frames. `vertico-child-frame` adapts geometry, margins, offsets, borders, and appearance to TTY character-cell coordinates while skipping GUI-only parameters (`font`, `alpha`, `left-fringe`, `right-fringe`).
+- **Emacs 29.1–30.x / small frames**: When running in a terminal without child-frame support or when the parent frame is smaller than `vertico-child-frame-min-parent-width` / `vertico-child-frame-min-parent-height`, `vertico-child-frame` automatically steps aside and optionally activates `vertico-child-frame-fallback-mode` before `vertico--setup` dispatches (so modes such as `vertico-buffer-mode`, `vertico-flat-mode`, or `vertico-grid-mode` take effect immediately for that session):
 
 ```elisp
 (setq vertico-child-frame-fallback-mode #'vertico-buffer-mode)
