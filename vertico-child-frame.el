@@ -58,6 +58,7 @@
 
 (defvar vertico--candidates)
 (defvar vertico--count-ov)
+(defvar vertico--input)
 (defvar vertico--scroll)
 (defvar vertico-multiform--display-modes)
 (defvar vertico-multiform-map)
@@ -65,6 +66,7 @@
 
 (declare-function vertico--command-p "vertico")
 (declare-function vertico--exhibit "vertico")
+(declare-function vertico--update "vertico")
 (declare-function vertico--window-width "vertico")
 (declare-function vertico-multiform--toggle "vertico-multiform")
 
@@ -487,6 +489,9 @@ This avoids first-popup `make-frame' and face-realization latency."
 
 (defvar-local vertico-child-frame--saved-cursor nil
   "Saved `cursor-in-non-selected-windows' value before setup.")
+
+(defvar-local vertico-child-frame--init-timer nil
+  "Idle timer ensuring initial candidate exhibition after frame mapping.")
 
 (defvar-local vertico-child-frame--fallback-active nil
   "Fallback mode symbol activated for the current session, if any.")
@@ -1736,6 +1741,25 @@ child frame immediately."
   (when vertico-child-frame--active
     (vertico-child-frame--resize (or vertico-child-frame--last-lines vertico-count))))
 
+(defun vertico-child-frame--ensure-initial-exhibit (buf)
+  "Re-run initial Vertico exhibit for BUF if frame events aborted it."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq vertico-child-frame--init-timer nil)
+      (when (and vertico-child-frame--active
+                 (boundp 'vertico--input)
+                 (eq vertico--input t)
+                 (minibufferp)
+                 (when-let* ((mbwin (active-minibuffer-window))
+                             ((window-live-p mbwin)))
+                   (eq buf (window-buffer mbwin))))
+        (with-local-quit
+          (let ((buffer-undo-list t))
+            (when (fboundp 'vertico--update)
+              (vertico--update))
+            (when (fboundp 'vertico--exhibit)
+              (vertico--exhibit))))))))
+
 (defun vertico-child-frame--setup ()
   "Set up the Vertico child frame for the current minibuffer session."
   (when (minibufferp)
@@ -1748,6 +1772,8 @@ child frame immediately."
         (let* ((depth (max 1 (minibuffer-depth)))
                (frame (vertico-child-frame--acquire-frame parent depth))
                (win (frame-root-window frame)))
+          (when (timerp vertico-child-frame--init-timer)
+            (cancel-timer vertico-child-frame--init-timer))
           (setq vertico-child-frame--active t
                 vertico-child-frame--frame frame
                 vertico-child-frame--window win
@@ -1761,6 +1787,7 @@ child frame immediately."
                 vertico-child-frame--orig-vertico-count-local
                 (local-variable-p 'vertico-count)
                 vertico-child-frame--saved-cursor cursor-in-non-selected-windows
+                vertico-child-frame--init-timer nil
                 vertico-child-frame--orig-truncate-lines truncate-lines
                 vertico-child-frame--orig-word-wrap word-wrap
                 vertico-child-frame--orig-auto-hscroll auto-hscroll-mode
@@ -1810,7 +1837,11 @@ child frame immediately."
           (when (window-live-p win)
             (set-window-point win (point)))
           (add-hook 'pre-redisplay-functions #'vertico-child-frame--redisplay 90 :local)
-          (add-hook 'minibuffer-exit-hook #'vertico-child-frame--teardown nil :local))))))
+          (add-hook 'minibuffer-exit-hook #'vertico-child-frame--teardown nil :local)
+          (setq vertico-child-frame--init-timer
+                (run-with-idle-timer
+                 0 nil #'vertico-child-frame--ensure-initial-exhibit
+                 (current-buffer))))))))
 
 (defun vertico-child-frame--teardown ()
   "Tear down the child frame for the current minibuffer session."
@@ -1819,16 +1850,20 @@ child frame immediately."
           (win vertico-child-frame--window)
           (depth vertico-child-frame--depth)
           (parent vertico-child-frame--parent)
+          (init-timer vertico-child-frame--init-timer)
           (mbwin (active-minibuffer-window)))
       (setq vertico-child-frame--active nil
             vertico-child-frame--frame nil
             vertico-child-frame--window nil
             vertico-child-frame--depth nil
             vertico-child-frame--parent nil
+            vertico-child-frame--init-timer nil
             vertico-child-frame--max-width-seen 0
             vertico-child-frame--content-width-cache nil
             vertico-child-frame--active-buffers
             (delq (current-buffer) vertico-child-frame--active-buffers))
+      (when (timerp init-timer)
+        (cancel-timer init-timer))
       (remove-hook 'pre-redisplay-functions #'vertico-child-frame--redisplay :local)
       (remove-hook 'minibuffer-exit-hook #'vertico-child-frame--teardown :local)
       (when (overlayp vertico--candidates-ov)
