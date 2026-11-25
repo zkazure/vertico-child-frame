@@ -455,6 +455,9 @@ This avoids first-popup `make-frame' and face-realization latency."
 (defconst vertico-child-frame--auto-width-max-ratio 0.9
   "Maximum auto-width fraction of parent width so a margin remains.")
 
+(defconst vertico-child-frame--tty-cell-aspect 2.0
+  "Assumed height-to-width visual aspect ratio of a TTY character cell.")
+
 (defvar vertico-child-frame--in-redisplay nil
   "Non-nil while executing inside `pre-redisplay-functions'.")
 
@@ -511,11 +514,18 @@ This avoids first-popup `make-frame' and face-realization latency."
 
 ;;;; Support detection and fallback
 
+(defun vertico-child-frame--tty-p (&optional frame)
+  "Return non-nil if FRAME is a non-graphical (TTY) frame."
+  (not (display-graphic-p frame)))
+
 (defun vertico-child-frame--supported-p (&optional frame)
   "Return non-nil if child frames are supported on FRAME."
   (or (display-graphic-p frame)
-      (and (boundp 'tty-child-frames)
-           (symbol-value 'tty-child-frames))))
+      (and (or (featurep 'tty-child-frames)
+               (and (boundp 'tty-child-frames)
+                    (symbol-value 'tty-child-frames)))
+           (or (null frame) (frame-live-p frame))
+           (not (null (tty-type frame))))))
 
 (defun vertico-child-frame--can-display-p (parent)
   "Return non-nil if PARENT can host a Vertico child frame."
@@ -553,16 +563,44 @@ This avoids first-popup `make-frame' and face-realization latency."
     (* (max 1 spec) unit-px))
    (t default-px)))
 
-(defun vertico-child-frame--chrome-size ()
-  "Return outer frame chrome (WIDTH . HEIGHT) added by borders and fringes."
-  (let ((border (max 0 (if (and (integerp vertico-child-frame-border-width)
-                                (> vertico-child-frame-border-width 0))
-                           vertico-child-frame-border-width
-                         (or vertico-child-frame-internal-border-width 0)))))
-    (cons (+ (max 0 vertico-child-frame-left-fringe)
-             (max 0 vertico-child-frame-right-fringe)
-             (* 2 border))
-          (* 2 border))))
+(defun vertico-child-frame--scale-tty-px (px unit)
+  "Scale pixel distance PX to TTY character cells using cell size UNIT."
+  (if (or (not (numberp px)) (zerop px))
+      0
+    (let ((mag (max 1 (round (/ (float (abs px)) unit)))))
+      (if (< px 0) (- mag) mag))))
+
+(defun vertico-child-frame--tty-border-width ()
+  "Return TTY child-frame border width in character cells (0 or 1)."
+  (if (or (and (integerp vertico-child-frame-border-width)
+               (> vertico-child-frame-border-width 0))
+          (and (integerp vertico-child-frame-internal-border-width)
+               (> vertico-child-frame-internal-border-width 0)))
+      1
+    0))
+
+(defun vertico-child-frame--margin (&optional parent)
+  "Return horizontal and vertical margin (MX . MY) for PARENT."
+  (let ((mx (max 0 (or (car-safe vertico-child-frame-margin) 0)))
+        (my (max 0 (or (cdr-safe vertico-child-frame-margin) 0))))
+    (if (vertico-child-frame--tty-p parent)
+        (cons (vertico-child-frame--scale-tty-px mx 10)
+              (vertico-child-frame--scale-tty-px my 20))
+      (cons mx my))))
+
+(defun vertico-child-frame--chrome-size (&optional parent)
+  "Return outer frame chrome (WIDTH . HEIGHT) on PARENT."
+  (if (vertico-child-frame--tty-p parent)
+      (let ((border (vertico-child-frame--tty-border-width)))
+        (cons (* 2 border) (* 2 border)))
+    (let ((border (max 0 (if (and (integerp vertico-child-frame-border-width)
+                                  (> vertico-child-frame-border-width 0))
+                             vertico-child-frame-border-width
+                           (or vertico-child-frame-internal-border-width 0)))))
+      (cons (+ (max 0 vertico-child-frame-left-fringe)
+               (max 0 vertico-child-frame-right-fringe)
+               (* 2 border))
+            (* 2 border)))))
 
 (defun vertico-child-frame-get-size ()
   "Return the default sizing plist for `vertico-child-frame-size-function'."
@@ -613,13 +651,18 @@ This avoids first-popup `make-frame' and face-realization latency."
          (lh (max 1 (frame-char-height parent)))
          (pw (max cw (frame-pixel-width parent)))
          (ph (max lh (frame-pixel-height parent)))
-         (parent-ratio (/ (float pw) ph))
+         (tty-p (vertico-child-frame--tty-p parent))
+         (aspect (if tty-p vertico-child-frame--tty-cell-aspect 1.0))
+         (eff-ph (if tty-p (* ph aspect) ph))
+         (parent-ratio (/ (float pw) eff-ph))
          (golden-w (if (> parent-ratio vertico-child-frame--golden-ratio)
-                       (* ph vertico-child-frame--golden-ratio)
+                       (* eff-ph vertico-child-frame--golden-ratio)
                      pw))
          (golden-h (if (> parent-ratio vertico-child-frame--golden-ratio)
                        ph
-                     (/ pw vertico-child-frame--golden-ratio)))
+                     (if tty-p
+                         (/ pw vertico-child-frame--golden-ratio aspect)
+                       (/ pw vertico-child-frame--golden-ratio))))
          (scale-num (if (numberp vertico-child-frame-golden-ratio-scale)
                         (float vertico-child-frame-golden-ratio-scale)
                       1.0))
@@ -692,8 +735,8 @@ CAP-PX bounds measurement so redundant layout passes can be skipped."
   "Compute child-frame text width in pixels for PARENT using SIZE-PLIST."
   (let* ((cw (max 1 (frame-char-width parent)))
          (pw (max cw (frame-pixel-width parent)))
-         (chrome-w (car (vertico-child-frame--chrome-size)))
-         (margin-x (max 0 (car vertico-child-frame-margin)))
+         (chrome-w (car (vertico-child-frame--chrome-size parent)))
+         (margin-x (car (vertico-child-frame--margin parent)))
          (avail-w (if (> pw (* 2 margin-x)) (- pw (* 2 margin-x)) pw))
          (max-parent-px (max cw (- avail-w chrome-w)))
          (spec (vertico-child-frame--size-option
@@ -794,8 +837,8 @@ CAP-PX bounds measurement so redundant layout passes can be skipped."
 PROMPT-LINES counts wrapped prompt lines."
   (let* ((lh (max 1 (frame-char-height parent)))
          (ph (max lh (frame-pixel-height parent)))
-         (chrome-h (cdr (vertico-child-frame--chrome-size)))
-         (margin-y (max 0 (cdr vertico-child-frame-margin)))
+         (chrome-h (cdr (vertico-child-frame--chrome-size parent)))
+         (margin-y (cdr (vertico-child-frame--margin parent)))
          (avail-h (if (> ph (* 2 margin-y)) (- ph (* 2 margin-y)) ph))
          (max-parent-px (max lh (- avail-h chrome-h)))
          (pl (max 1 (or prompt-lines 1)))
@@ -853,19 +896,20 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
 
 (defun vertico-child-frame--clamp-position (parent x y width height)
   "Clamp (X, Y) for child frame of WIDTH by HEIGHT within PARENT."
-  (let ((mx (max 0 (car vertico-child-frame-margin)))
-        (my (max 0 (cdr vertico-child-frame-margin)))
-        (pw (frame-pixel-width parent))
-        (ph (frame-pixel-height parent)))
+  (pcase-let ((`(,mx . ,my) (vertico-child-frame--margin parent))
+              (pw (frame-pixel-width parent))
+              (ph (frame-pixel-height parent)))
     (cons (vertico-child-frame--clamp-coord x width pw mx)
           (vertico-child-frame--clamp-coord y height ph my))))
 
-(defun vertico-child-frame--resolve-offset (offset dim)
-  "Resolve OFFSET against pixel dimension DIM."
+(defun vertico-child-frame--resolve-offset (offset dim &optional parent)
+  "Resolve OFFSET against pixel dimension DIM on PARENT."
   (cond
-   ((null offset) (max 0 (cdr vertico-child-frame-margin)))
+   ((null offset) (cdr (vertico-child-frame--margin parent)))
    ((and (floatp offset) (< offset 1.0) (>= offset 0.0))
     (round (* dim offset)))
+   ((vertico-child-frame--tty-p parent)
+    (vertico-child-frame--scale-tty-px offset 20))
    (t (round offset))))
 
 (defun vertico-child-frame--selected-window (parent)
@@ -904,8 +948,8 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
   "Return bottom inset in pixels on PARENT for bottom-aligned poshandlers."
   (if vertico-child-frame-bottom-offset
       (vertico-child-frame--resolve-offset
-       vertico-child-frame-bottom-offset (frame-pixel-height parent))
-    (+ (max 0 (cdr vertico-child-frame-margin))
+       vertico-child-frame-bottom-offset (frame-pixel-height parent) parent)
+    (+ (cdr (vertico-child-frame--margin parent))
        (if vertico-child-frame-bottom-respect-mode-line
            (+ (let ((mb (minibuffer-window parent)))
                 (if (and (window-live-p mb) (eq (window-frame mb) parent))
@@ -917,43 +961,44 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
 
 (defun vertico-child-frame--window-bottom-inset (win win-h)
   "Return bottom inset in pixels on WIN of pixel height WIN-H."
-  (if vertico-child-frame-bottom-offset
-      (vertico-child-frame--resolve-offset
-       vertico-child-frame-bottom-offset win-h)
-    (+ (max 0 (cdr vertico-child-frame-margin))
-       (if vertico-child-frame-bottom-respect-mode-line
-           (vertico-child-frame--window-mode-line-height win)
-         0))))
+  (let ((parent (and (window-live-p win) (window-frame win))))
+    (if vertico-child-frame-bottom-offset
+        (vertico-child-frame--resolve-offset
+         vertico-child-frame-bottom-offset win-h parent)
+      (+ (cdr (vertico-child-frame--margin parent))
+         (if vertico-child-frame-bottom-respect-mode-line
+             (vertico-child-frame--window-mode-line-height win)
+           0)))))
 
 (defun vertico-child-frame--position-in-edges (anchor edges width height &optional win)
   "Compute (X . Y) for ANCHOR in pixel EDGES of WIN for WIDTH by HEIGHT."
-  (pcase-let ((`(,left ,top ,right ,bottom) edges)
-              (mx (max 0 (car vertico-child-frame-margin)))
-              (my (max 0 (cdr vertico-child-frame-margin))))
-    (pcase anchor
-      ('center
-       (cons (+ left (round (/ (- (- right left) width) 2.0)))
-             (+ top (round (/ (- (- bottom top) height) 2.0)))))
-      ('top-center
-       (let ((win-w (- right left))
-             (win-h (- bottom top)))
-         (cons (+ left (round (/ (- win-w width) 2.0)))
-               (+ top (vertico-child-frame--resolve-offset
-                       vertico-child-frame-top-offset win-h)))))
-      ('top-left-corner (cons (+ left mx) (+ top my)))
-      ('top-right-corner (cons (- right width mx) (+ top my)))
-      ('bottom-center
-       (cons (+ left (round (/ (- (- right left) width) 2.0)))
-             (- bottom height
-                (vertico-child-frame--window-bottom-inset win (- bottom top)))))
-      ('bottom-left-corner
-       (cons (+ left mx)
-             (- bottom height
-                (vertico-child-frame--window-bottom-inset win (- bottom top)))))
-      ('bottom-right-corner
-       (cons (- right width mx)
-             (- bottom height
-                (vertico-child-frame--window-bottom-inset win (- bottom top))))))))
+  (let ((parent (and (window-live-p win) (window-frame win))))
+    (pcase-let ((`(,left ,top ,right ,bottom) edges)
+                (`(,mx . ,my) (vertico-child-frame--margin parent)))
+      (pcase anchor
+        ('center
+         (cons (+ left (round (/ (- (- right left) width) 2.0)))
+               (+ top (round (/ (- (- bottom top) height) 2.0)))))
+        ('top-center
+         (let ((win-w (- right left))
+               (win-h (- bottom top)))
+           (cons (+ left (round (/ (- win-w width) 2.0)))
+                 (+ top (vertico-child-frame--resolve-offset
+                         vertico-child-frame-top-offset win-h parent)))))
+        ('top-left-corner (cons (+ left mx) (+ top my)))
+        ('top-right-corner (cons (- right width mx) (+ top my)))
+        ('bottom-center
+         (cons (+ left (round (/ (- (- right left) width) 2.0)))
+               (- bottom height
+                  (vertico-child-frame--window-bottom-inset win (- bottom top)))))
+        ('bottom-left-corner
+         (cons (+ left mx)
+               (- bottom height
+                  (vertico-child-frame--window-bottom-inset win (- bottom top)))))
+        ('bottom-right-corner
+         (cons (- right width mx)
+               (- bottom height
+                  (vertico-child-frame--window-bottom-inset win (- bottom top)))))))))
 
 (defun vertico-child-frame--point-pixel-position (parent)
   "Return (X Y LINE-HEIGHT) in pixels for point in selected window on PARENT."
@@ -971,7 +1016,7 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
 
 (defun vertico-child-frame--point-y-below-or-above (parent py lh height)
   "Return Y below PY (with line height LH) or above if HEIGHT overflows PARENT."
-  (let ((my (max 0 (cdr vertico-child-frame-margin)))
+  (let ((my (cdr (vertico-child-frame--margin parent)))
         (ph (frame-pixel-height parent)))
     (if (and (> (+ py lh height my) ph)
              (>= (- py height) my))
@@ -983,7 +1028,8 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
   (let ((x (round (/ (- (frame-pixel-width parent) width) 2.0)))
         (y (vertico-child-frame--resolve-offset
             vertico-child-frame-top-offset
-            (frame-pixel-height parent))))
+            (frame-pixel-height parent)
+            parent)))
     (cons x y)))
 
 (defalias 'vertico-child-frame-poshandler-top-center
@@ -1007,26 +1053,26 @@ Uses SIZE-PLIST to check whether an explicit height was configured."
 (defalias 'vertico-child-frame-poshandler-bottom-center
   #'vertico-child-frame-poshandler-frame-bottom-center)
 
-(defun vertico-child-frame-poshandler-frame-top-left-corner (_parent _width _height)
-  "Position child frame at the top-left corner within margins."
-  (cons (max 0 (car vertico-child-frame-margin))
-        (max 0 (cdr vertico-child-frame-margin))))
+(defun vertico-child-frame-poshandler-frame-top-left-corner (parent _width _height)
+  "Position child frame at the top-left corner of PARENT within margins."
+  (vertico-child-frame--margin parent))
 
 (defun vertico-child-frame-poshandler-frame-top-right-corner (parent width _height)
   "Position child frame of WIDTH at the top-right corner of PARENT."
-  (cons (- (frame-pixel-width parent) width (max 0 (car vertico-child-frame-margin)))
-        (max 0 (cdr vertico-child-frame-margin))))
+  (pcase-let ((`(,mx . ,my) (vertico-child-frame--margin parent)))
+    (cons (- (frame-pixel-width parent) width mx) my)))
 
 (defun vertico-child-frame-poshandler-frame-bottom-left-corner (parent _width height)
   "Position child frame of HEIGHT at the bottom-left corner of PARENT."
-  (cons (max 0 (car vertico-child-frame-margin))
+  (cons (car (vertico-child-frame--margin parent))
         (- (frame-pixel-height parent)
            height
            (vertico-child-frame--frame-bottom-inset parent))))
 
 (defun vertico-child-frame-poshandler-frame-bottom-right-corner (parent width height)
   "Position child frame of WIDTH by HEIGHT at bottom-right corner of PARENT."
-  (cons (- (frame-pixel-width parent) width (max 0 (car vertico-child-frame-margin)))
+  (cons (- (frame-pixel-width parent) width
+           (car (vertico-child-frame--margin parent)))
         (- (frame-pixel-height parent)
            height
            (vertico-child-frame--frame-bottom-inset parent))))
@@ -1260,16 +1306,21 @@ Falls back to PARENT center if point position is unavailable."
          (prompt-lines (vertico-child-frame--prompt-lines parent width))
          (height (vertico-child-frame--resolve-height
                   parent lines prompt-lines size-plist))
-         (chrome (vertico-child-frame--chrome-size))
+         (chrome (vertico-child-frame--chrome-size parent))
          (outer-w (+ width (car chrome)))
          (outer-h (+ height (cdr chrome)))
          (fn (vertico-child-frame--resolve-poshandler vertico-child-frame-poshandler))
          (pos (funcall fn parent outer-w outer-h))
-         (ox (car vertico-child-frame-offset))
-         (oy (cdr vertico-child-frame-offset))
+         (tty-p (vertico-child-frame--tty-p parent))
+         (raw-ox (car vertico-child-frame-offset))
+         (raw-oy (cdr vertico-child-frame-offset))
+         (ox (if tty-p (vertico-child-frame--scale-tty-px raw-ox 10) raw-ox))
+         (oy (if tty-p (vertico-child-frame--scale-tty-px raw-oy 20) raw-oy))
          (level (max 0 (1- (or depth 1))))
-         (dx (* level (car vertico-child-frame-recursive-offset)))
-         (dy (* level (cdr vertico-child-frame-recursive-offset)))
+         (raw-rx (car vertico-child-frame-recursive-offset))
+         (raw-ry (cdr vertico-child-frame-recursive-offset))
+         (dx (* level (if tty-p (vertico-child-frame--scale-tty-px raw-rx 10) raw-rx)))
+         (dy (* level (if tty-p (vertico-child-frame--scale-tty-px raw-ry 20) raw-ry)))
          (clamped (vertico-child-frame--clamp-position
                    parent (+ (car pos) ox dx) (+ (cdr pos) oy dy)
                    outer-w outer-h)))
@@ -1289,46 +1340,65 @@ Falls back to PARENT center if point position is unavailable."
     buf))
 
 (defun vertico-child-frame--face-attribute (face attr &optional frame)
-  "Return ATTR of FACE on FRAME, ignoring `unspecified'."
-  (let ((val (face-attribute face attr frame t)))
-    (unless (eq val 'unspecified) val)))
+  "Return ATTR of FACE on FRAME, ignoring unspecified values."
+  (let ((val (face-attribute face attr (and (framep frame) frame) t)))
+    (unless (or (eq val 'unspecified)
+                (equal val "unspecified-bg")
+                (equal val "unspecified-fg"))
+      val)))
 
 (defun vertico-child-frame--appearance-spec (parent)
   "Return resolved appearance attribute list for child frames on PARENT."
-  (let* ((font (or vertico-child-frame-font
-                   (vertico-child-frame--face-attribute 'vertico-child-frame :font)
-                   (frame-parameter parent 'font)))
-         (bg (or (vertico-child-frame--face-attribute 'vertico-child-frame :background)
-                 (vertico-child-frame--face-attribute 'default :background parent)))
-         (fg (or (vertico-child-frame--face-attribute 'vertico-child-frame :foreground)
-                 (vertico-child-frame--face-attribute 'default :foreground parent)))
+  (let* ((tty-p (vertico-child-frame--tty-p parent))
+         (font (unless tty-p
+                 (or vertico-child-frame-font
+                     (vertico-child-frame--face-attribute
+                      'vertico-child-frame :font parent)
+                     (frame-parameter parent 'font))))
+         (bg (or (vertico-child-frame--face-attribute
+                  'vertico-child-frame :background parent)
+                 (vertico-child-frame--face-attribute
+                  'default :background parent)))
+         (fg (or (vertico-child-frame--face-attribute
+                  'vertico-child-frame :foreground parent)
+                 (vertico-child-frame--face-attribute
+                  'default :foreground parent)))
          (border-bg (vertico-child-frame--face-attribute
-                     'vertico-child-frame-border :background))
+                     'vertico-child-frame-border :background parent))
          (ib-bg (if (and (integerp vertico-child-frame-border-width)
                          (zerop vertico-child-frame-border-width)
                          border-bg)
                     border-bg
                   bg))
-         (alpha-bg (if (integerp vertico-child-frame-alpha)
-                       vertico-child-frame-alpha
-                     (alist-get 'alpha-background vertico-child-frame-parameters)))
-         (alpha-pair (if (consp vertico-child-frame-alpha)
+         (alpha-bg (unless tty-p
+                     (if (integerp vertico-child-frame-alpha)
                          vertico-child-frame-alpha
-                       (alist-get 'alpha vertico-child-frame-parameters)))
-         (border-width (if (and (integerp vertico-child-frame-border-width)
-                                (zerop vertico-child-frame-border-width)
-                                (integerp vertico-child-frame-internal-border-width)
-                                (> vertico-child-frame-internal-border-width 0))
-                           nil
-                         vertico-child-frame-border-width)))
+                       (alist-get 'alpha-background
+                                  vertico-child-frame-parameters))))
+         (alpha-pair (unless tty-p
+                       (if (consp vertico-child-frame-alpha)
+                           vertico-child-frame-alpha
+                         (alist-get 'alpha vertico-child-frame-parameters))))
+         (tty-bw (and tty-p (vertico-child-frame--tty-border-width)))
+         (use-ib (and (integerp vertico-child-frame-border-width)
+                      (zerop vertico-child-frame-border-width)
+                      (integerp vertico-child-frame-internal-border-width)
+                      (> vertico-child-frame-internal-border-width 0)))
+         (border-width (if tty-p
+                           (unless use-ib tty-bw)
+                         (unless use-ib vertico-child-frame-border-width)))
+         (ib-width (if tty-p
+                       (if use-ib tty-bw 0)
+                     vertico-child-frame-internal-border-width))
+         (lf (if tty-p 0 vertico-child-frame-left-fringe))
+         (rf (if tty-p 0 vertico-child-frame-right-fringe)))
     (list font bg fg border-bg ib-bg alpha-bg alpha-pair border-width
-          vertico-child-frame-internal-border-width
-          vertico-child-frame-left-fringe
-          vertico-child-frame-right-fringe)))
+          ib-width lf rf)))
 
 (defun vertico-child-frame--sync-appearance (frame parent)
   "Synchronize FRAME fonts, colors, borders, alpha, and fringes from PARENT."
-  (let* ((sig (vertico-child-frame--appearance-spec parent))
+  (let* ((tty-p (vertico-child-frame--tty-p parent))
+         (sig (vertico-child-frame--appearance-spec parent))
          (cached (frame-parameter frame 'vertico-child-frame--appearance)))
     (unless (equal sig cached)
       (pcase-let*
@@ -1336,13 +1406,15 @@ Falls back to PARENT center if point position is unavailable."
               ,border-width ,ib-width ,lf ,rf)
             sig)
            (params (delq nil
-                         (list (when font (cons 'font font))
-                               (when bg (cons 'background-color bg))
-                               (when fg (cons 'foreground-color fg))
-                               (cons 'alpha-background alpha-bg)
-                               (cons 'alpha alpha-pair)
-                               (cons 'child-frame-border-width border-width)
-                               (cons 'internal-border-width ib-width))))
+                         (append
+                          (list (when font (cons 'font font))
+                                (when bg (cons 'background-color bg))
+                                (when fg (cons 'foreground-color fg))
+                                (cons 'child-frame-border-width border-width)
+                                (cons 'internal-border-width ib-width))
+                          (unless tty-p
+                            (list (cons 'alpha-background alpha-bg)
+                                  (cons 'alpha alpha-pair))))))
            (changed-params
             (cl-remove-if
              (lambda (pair)
@@ -1357,9 +1429,10 @@ Falls back to PARENT center if point position is unavailable."
                  (or (null cached)
                      (not (equal ib-bg (nth 4 cached))))))
            (fringe-changed
-            (or (null cached)
-                (not (eql lf (nth 9 cached)))
-                (not (eql rf (nth 10 cached))))))
+            (and (not tty-p)
+                 (or (null cached)
+                     (not (eql lf (nth 9 cached)))
+                     (not (eql rf (nth 10 cached)))))))
         (let ((frame-inhibit-implied-resize t)
               (inhibit-redisplay t))
           (when changed-params
@@ -1391,7 +1464,8 @@ Falls back to PARENT center if point position is unavailable."
         (ignore-errors (delete-frame frame)))
       (setq frame
             (pcase-let*
-                ((`(,font ,bg ,fg ,_border-bg ,_ib-bg ,alpha-bg ,alpha-pair
+                ((tty-p (vertico-child-frame--tty-p parent))
+                 (`(,font ,bg ,fg ,_border-bg ,_ib-bg ,alpha-bg ,alpha-pair
                     ,border-width ,ib-width ,lf ,rf)
                   (vertico-child-frame--appearance-spec parent))
                  (init-px (vertico-child-frame--golden-pixel-size parent))
@@ -1401,20 +1475,22 @@ Falls back to PARENT center if point position is unavailable."
                                               (max 1 (frame-char-height parent))))))
                  (init-params
                   (delq nil
-                        (list (cons 'parent-frame parent)
-                              (cons 'minibuffer (minibuffer-window parent))
-                              '(visibility . nil)
-                              (cons 'width init-cols)
-                              (cons 'height init-rows)
-                              (when font (cons 'font font))
-                              (when bg (cons 'background-color bg))
-                              (when fg (cons 'foreground-color fg))
-                              (cons 'alpha-background alpha-bg)
-                              (cons 'alpha alpha-pair)
-                              (cons 'child-frame-border-width border-width)
-                              (cons 'internal-border-width ib-width)
-                              (cons 'left-fringe lf)
-                              (cons 'right-fringe rf))))
+                        (append
+                         (list (cons 'parent-frame parent)
+                               (cons 'minibuffer (minibuffer-window parent))
+                               '(visibility . nil)
+                               (cons 'width init-cols)
+                               (cons 'height init-rows)
+                               (when font (cons 'font font))
+                               (when bg (cons 'background-color bg))
+                               (when fg (cons 'foreground-color fg))
+                               (cons 'child-frame-border-width border-width)
+                               (cons 'internal-border-width ib-width))
+                         (unless tty-p
+                           (list (cons 'alpha-background alpha-bg)
+                                 (cons 'alpha alpha-pair)
+                                 (cons 'left-fringe lf)
+                                 (cons 'right-fringe rf))))))
                  (frame-inhibit-implied-resize t))
               (make-frame
                (append init-params
@@ -1729,6 +1805,7 @@ child frame immediately."
     (let ((frame vertico-child-frame--frame)
           (win vertico-child-frame--window)
           (depth vertico-child-frame--depth)
+          (parent vertico-child-frame--parent)
           (mbwin (active-minibuffer-window)))
       (setq vertico-child-frame--active nil
             vertico-child-frame--frame nil
@@ -1768,6 +1845,10 @@ child frame immediately."
           (set-window-buffer win (vertico-child-frame--scratch-buffer))))
       (when (frame-live-p frame)
         (ignore-errors (make-frame-invisible frame t)))
+      (when (and (frame-live-p parent)
+                 (vertico-child-frame--tty-p parent)
+                 (framep parent))
+        (ignore-errors (redraw-frame parent)))
       (setq vertico-child-frame--active-frames
             (assq-delete-all depth vertico-child-frame--active-frames))
       (when-let* ((outer (cdar vertico-child-frame--active-frames))

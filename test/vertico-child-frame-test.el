@@ -191,8 +191,9 @@
           ((symbol-function 'make-frame)
            (lambda (&optional params)
              (cl-incf make-frame-calls)
-             (let* ((cw 10)
-                    (ch 20)
+             (let* ((pf (alist-get 'parent-frame params))
+                    (cw (if (vcf-test-frame-p pf) (vcf-test-frame-char-w pf) 10))
+                    (ch (if (vcf-test-frame-p pf) (vcf-test-frame-char-h pf) 20))
                     (cols (max 1 (or (alist-get 'width params) 72)))
                     (rows (max 1 (or (alist-get 'height params) 11)))
                     (pw (* cols cw))
@@ -765,6 +766,133 @@
                 (run-hooks 'minibuffer-exit-hook)
                 (should-not fallback-state)))
           (vertico-child-frame-mode -1))))))
+
+(ert-deftest vcf-test-tty-child-frames-support-and-geometry ()
+  "Verify Emacs 31+ `tty-child-frames' detection, cell geometry, and lifecycle."
+  (vcf-test-with-mock-gui
+    (let ((tty-feature t)
+          (tty-term "xterm-256color")
+          (fringe-calls 0)
+          (orig-featurep (symbol-function 'featurep))
+          (orig-tty-type (symbol-function 'tty-type)))
+      (setf (vcf-test-frame-char-w parent-frame) 1
+            (vcf-test-frame-char-h parent-frame) 1
+            (vcf-test-frame-pixel-w parent-frame) 120
+            (vcf-test-frame-pixel-h parent-frame) 40
+            (vcf-test-frame-cols parent-frame) 120
+            (vcf-test-frame-rows parent-frame) 40
+            (vcf-test-frame-params parent-frame) nil
+            (vcf-test-win-pixel-h mb-win) 1
+            (vcf-test-win-edges parent-win) '(0 0 120 40)
+            (vcf-test-win-inside-edges parent-win) '(0 0 120 40))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _f) nil))
+                ((symbol-function 'featurep)
+                 (lambda (feat &optional sub)
+                   (if (eq feat 'tty-child-frames)
+                       tty-feature
+                     (funcall orig-featurep feat sub))))
+                ((symbol-function 'tty-type)
+                 (lambda (&optional f)
+                   (if (or (null f) (vcf-test-frame-p f))
+                       tty-term
+                     (funcall orig-tty-type f))))
+                ((symbol-function 'set-window-fringes)
+                 (lambda (&rest _args) (cl-incf fringe-calls))))
+        ;; Feature + live tty-type detection matrix
+        (should (vertico-child-frame--supported-p parent-frame))
+        (setq tty-term nil)
+        (should-not (vertico-child-frame--supported-p parent-frame))
+        (setq tty-term "xterm-256color"
+              tty-feature nil)
+        (should-not (vertico-child-frame--supported-p parent-frame))
+        (setq tty-feature t)
+        ;; Chrome omits fringes on TTY and clamps border to 1 cell
+        (let ((vertico-child-frame-border-width 1)
+              (vertico-child-frame-left-fringe 8)
+              (vertico-child-frame-right-fringe 8))
+          (should (equal (vertico-child-frame--chrome-size parent-frame) '(2 . 2))))
+        (let ((vertico-child-frame-border-width 0)
+              (vertico-child-frame-internal-border-width 0))
+          (should (equal (vertico-child-frame--chrome-size parent-frame) '(0 . 0))))
+        ;; Golden ratio respects 2:1 TTY cell aspect on 120x40 and 80x24
+        (let ((vertico-child-frame-golden-ratio-scale 1.0))
+          (should (equal (vertico-child-frame--golden-pixel-size parent-frame)
+                         '(74 . 23)))
+          (let ((small-tty (make-vcf-test-frame
+                            :id 88 :pixel-w 80 :pixel-h 24
+                            :char-w 1 :char-h 1 :cols 80 :rows 24 :live t)))
+            (should (equal (vertico-child-frame--golden-pixel-size small-tty)
+                           '(48 . 15)))))
+        ;; Margin, offset, and recursive-offset scale from GUI px to TTY cells
+        (let ((vertico-child-frame-width 40)
+              (vertico-child-frame-min-width nil)
+              (vertico-child-frame-resize nil)
+              (vertico-count 10)
+              (vertico-child-frame-border-width 1)
+              (vertico-child-frame-margin '(16 . 16))
+              (vertico-child-frame-offset '(0 . 0))
+              (vertico-child-frame-recursive-offset '(24 . 24)))
+          (let ((vertico-child-frame-poshandler 'frame-top-left-corner))
+            (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                           '(2 1 40 11))))
+          (let ((vertico-child-frame-poshandler 'frame-center))
+            (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                           '(39 14 40 11)))
+            (should (equal (vertico-child-frame--compute-geometry parent-frame 10 2)
+                           '(41 15 40 11)))
+            (let ((vertico-child-frame-offset '(-10 . -20)))
+              (should (equal (vertico-child-frame--compute-geometry parent-frame 10 1)
+                             '(38 13 40 11))))))
+        ;; Full TTY setup, recursive minibuffer, and teardown lifecycle
+        (let ((vertico-child-frame-font "Monospace-12")
+              (vertico-child-frame-alpha 90)
+              (vertico-child-frame-border-width 2)
+              (vertico-child-frame-internal-border-width 8)
+              (vertico-child-frame-left-fringe 8)
+              (vertico-child-frame-right-fringe 8)
+              (vertico-child-frame-recursive-offset '(24 . 24))
+              (depth 1)
+              (buf1 (generate-new-buffer " *tty-mb1*"))
+              (buf2 (generate-new-buffer " *tty-mb2*")))
+          (vertico-child-frame-mode 1)
+          (unwind-protect
+              (cl-letf (((symbol-function 'minibufferp) (lambda (&optional _b _l) t))
+                        ((symbol-function 'minibuffer-depth) (lambda () depth)))
+                (with-current-buffer buf1
+                  (setf (vcf-test-win-buffer mb-win) buf1)
+                  (vertico--setup)
+                  (should vertico-child-frame--active)
+                  (let ((f1 vertico-child-frame--frame))
+                    (should (= make-frame-calls 1))
+                    (should (= fringe-calls 0))
+                    (should-not (frame-parameter f1 'font))
+                    (should-not (frame-parameter f1 'alpha))
+                    (should-not (frame-parameter f1 'alpha-background))
+                    (should-not (frame-parameter f1 'left-fringe))
+                    (should-not (frame-parameter f1 'right-fringe))
+                    (should (= (frame-parameter f1 'child-frame-border-width) 1))
+                    (should (= (frame-parameter f1 'internal-border-width) 0))
+                    (setq depth 2)
+                    (with-current-buffer buf2
+                      (setf (vcf-test-win-buffer mb-win) buf2)
+                      (vertico--setup)
+                      (let ((f2 vertico-child-frame--frame))
+                        (should (= make-frame-calls 2))
+                        (should (equal (vcf-test-frame-pos f2)
+                                       (cons (+ (car (vcf-test-frame-pos f1)) 2)
+                                             (+ (cdr (vcf-test-frame-pos f1)) 1))))
+                        (setf (vcf-test-frame-raised f1) nil)
+                        (run-hooks 'minibuffer-exit-hook)
+                        (should-not (vcf-test-frame-visible f2))
+                        (should (vcf-test-frame-visible f1))
+                        (should (vcf-test-frame-raised f1))))
+                    (setq depth 1)
+                    (setf (vcf-test-win-buffer mb-win) buf1)
+                    (run-hooks 'minibuffer-exit-hook)
+                    (should-not (vcf-test-frame-visible f1)))))
+            (when (buffer-live-p buf1) (kill-buffer buf1))
+            (when (buffer-live-p buf2) (kill-buffer buf2))
+            (vertico-child-frame-mode -1)))))))
 
 ;;;; Lifecycle, pooling, recursive minibuffers, and multiform tests
 
